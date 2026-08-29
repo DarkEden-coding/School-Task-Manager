@@ -1,10 +1,23 @@
-import { getSupportedThinkingLevels, type ThinkingLevelMap } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels, type Model, type ThinkingLevelMap } from "@earendil-works/pi-ai";
 import { OPENROUTER_MODELS } from "@earendil-works/pi-ai/providers/openrouter.models";
 import type { AppDatabase } from "./database.js";
 import { buildClassifyPrompt, CLASSIFY_SYSTEM_PROMPT, CLASSIFY_TOOL, classifiedEventsFromToolCall, type ApprovedEventRef, type ClassifiedEvent, type EmailForModel } from "./classify.js";
 import type { AvailableModel, ModelProviderId, ReasoningLevel } from "./types.js";
 
+type CatalogModel = Model<"openai-completions">;
+
+interface OpenRouterCatalogEntry {
+  id: string;
+  name?: string;
+  context_length?: number;
+  pricing?: { prompt?: string; completion?: string; input_cache_read?: string };
+  top_provider?: { max_completion_tokens?: number | null };
+  supported_parameters?: string[];
+  reasoning?: { supported_efforts?: string[] | null };
+}
+
 const OPENROUTER_ORIGIN = "https://openrouter.ai";
+const LIVE_MODELS_TTL_MS = 60 * 60_000;
 const SYNC_TIMEOUT_MS = 45_000;
 const BATCH_TIMEOUT_MS = 24 * 60 * 60_000;
 const PROVIDER_ID = "openrouter";
@@ -88,10 +101,10 @@ export class OpenRouterService {
     await this.database.modify(PROVIDER_ID, async () => ({ type: "api_key", key }));
   }
 
-  /** Lists catalog models, optionally filtered by id or display name. */
-  public listModels(query = ""): AvailableModel[] {
+  /** Lists the merged catalog, optionally filtered by id or display name. */
+  public async listModels(query = ""): Promise<AvailableModel[]> {
     const needle = query.trim().toLowerCase();
-    return Object.values(OPENROUTER_MODELS)
+    const models = (await mergedCatalogModels())
       .filter((model) => !needle || model.id.toLowerCase().includes(needle) || model.name.toLowerCase().includes(needle))
       .map((model) => ({
         id: model.id,
@@ -99,6 +112,8 @@ export class OpenRouterService {
         reasoningLevels: getSupportedThinkingLevels(model) as ReasoningLevel[],
         batch: isOpenRouterBatchModel(model.id),
       }));
+    // The live catalog lists plain slugs only; synthesize `:batch` variants so batch scans work with new models too.
+    return [...models, ...models.filter((model) => !model.batch).map((model) => ({ ...model, id: `${model.id}:batch`, batch: true }))];
   }
 
   /** Extracts event candidates, using the Batch API whenever a `:batch` model is selected. */
@@ -109,7 +124,7 @@ export class OpenRouterService {
       if (result.error) throw new Error(result.error);
       return result.events;
     }
-    const prepared = this.prepareRequest(email);
+    const prepared = await this.prepareRequest(email);
     const completion = await this.completeSync(await this.apiKey(), prepared.modelId, prepared.body);
     return classifiedEventsFromToolCall(toolCallFromCompletion(completion), this.database.getSettings().timezone, prepared.approved);
   }
@@ -118,8 +133,7 @@ export class OpenRouterService {
   public async classifyEmails(emails: EmailForModel[], onProgress?: (progress: BatchProgress) => void): Promise<ClassifyEmailResult[]> {
     if (!emails.length) return [];
     const settings = this.database.getSettings();
-    const catalogModel = Object.values(OPENROUTER_MODELS).find((item) => item.id === settings.modelId);
-    if (!catalogModel) throw new Error("Choose an OpenRouter model");
+    const catalogModel = await this.findCatalogModel(settings.modelId);
     const apiKey = await this.apiKey();
     const approved: ApprovedEventRef[] = this.database.listCandidates("history")
       .filter((item) => item.status === "approved" && (!item.end || Date.parse(item.end) > Date.now()))
@@ -154,11 +168,19 @@ export class OpenRouterService {
     });
   }
 
-  /** Builds one chat-completions body from current settings and approved events. */
-  private prepareRequest(email: EmailForModel): { modelId: string; body: OpenRouterChatBody; approved: ApprovedEventRef[] } {
-    const settings = this.database.getSettings();
-    const model = Object.values(OPENROUTER_MODELS).find((item) => item.id === settings.modelId);
+  /** Resolves a settings model id against the merged catalog, tolerating the `:batch` suffix. */
+  private async findCatalogModel(modelId: string): Promise<CatalogModel> {
+    const baseId = openRouterInferenceModelId(modelId);
+    const catalog = await mergedCatalogModels();
+    const model = catalog.find((item) => item.id === modelId) ?? catalog.find((item) => item.id === baseId);
     if (!model) throw new Error("Choose an OpenRouter model");
+    return model;
+  }
+
+  /** Builds one chat-completions body from current settings and approved events. */
+  private async prepareRequest(email: EmailForModel): Promise<{ modelId: string; body: OpenRouterChatBody; approved: ApprovedEventRef[] }> {
+    const settings = this.database.getSettings();
+    const model = await this.findCatalogModel(settings.modelId);
     const approved: ApprovedEventRef[] = this.database.listCandidates("history")
       .filter((item) => item.status === "approved" && (!item.end || Date.parse(item.end) > Date.now()))
       .slice(0, 100)
@@ -330,4 +352,65 @@ function isOpenRouterApiKey(value: string): boolean {
 /** Waits for the next batch poll. */
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Converts a live /api/v1/models entry into the catalog shape the app needs. */
+function liveEntryToCatalogModel(entry: OpenRouterCatalogEntry): CatalogModel {
+  const perMillion = (value?: string) => { const parsed = Number(value); return Number.isFinite(parsed) ? parsed * 1e6 : 0; };
+  const reasoning = (entry.supported_parameters ?? []).some((parameter) => parameter === "reasoning" || parameter === "reasoning_effort");
+  const model: CatalogModel = {
+    id: entry.id,
+    name: entry.name || entry.id,
+    api: "openai-completions",
+    provider: "openrouter",
+    baseUrl: "https://openrouter.ai/api/v1",
+    reasoning,
+    input: ["text"],
+    cost: { input: perMillion(entry.pricing?.prompt), output: perMillion(entry.pricing?.completion), cacheRead: perMillion(entry.pricing?.input_cache_read), cacheWrite: 0 },
+    contextWindow: entry.context_length ?? 0,
+    maxTokens: entry.top_provider?.max_completion_tokens ?? 0,
+    compat: { supportsDeveloperRole: false, thinkingFormat: "openrouter" },
+  };
+  if (reasoning) {
+    const map = thinkingLevelMapFromEfforts(entry.reasoning?.supported_efforts);
+    if (map) model.thinkingLevelMap = map;
+  }
+  return model;
+}
+
+/** Maps OpenRouter's supported efforts onto the app's thinking levels; null marks unsupported. */
+function thinkingLevelMapFromEfforts(efforts: string[] | null | undefined): ThinkingLevelMap | undefined {
+  if (!efforts?.length) return undefined;
+  const levels: Array<[keyof ThinkingLevelMap, string]> = [
+    ["off", "none"], ["minimal", "minimal"], ["low", "low"], ["medium", "medium"], ["high", "high"], ["xhigh", "xhigh"], ["max", "max"],
+  ];
+  return Object.fromEntries(levels.map(([level, effort]) => [level, efforts.includes(effort) ? effort : null])) as ThinkingLevelMap;
+}
+
+/** Cached live catalog; refreshed hourly, kept as stale fallback when OpenRouter is unreachable. */
+let liveModelsCache: { at: number; models: CatalogModel[] } | null = null;
+
+/** Fetches the public live model catalog, returning null when unavailable. */
+async function fetchLiveCatalogModels(): Promise<CatalogModel[] | null> {
+  if (liveModelsCache && Date.now() - liveModelsCache.at < LIVE_MODELS_TTL_MS) return liveModelsCache.models;
+  try {
+    const response = await fetch(`${OPENROUTER_ORIGIN}/api/v1/models`, { signal: AbortSignal.timeout(10_000) });
+    const payload = await response.json() as { data?: OpenRouterCatalogEntry[] };
+    const models = (payload.data ?? []).map(liveEntryToCatalogModel);
+    if (!models.length) throw new Error("OpenRouter returned no models");
+    liveModelsCache = { at: Date.now(), models };
+    return models;
+  } catch {
+    return liveModelsCache?.models ?? null;
+  }
+}
+
+/** Merges the bundled catalog with live-only models; bundled entries win so curated reasoning maps survive. */
+async function mergedCatalogModels(): Promise<CatalogModel[]> {
+  const bundled = Object.values(OPENROUTER_MODELS) as CatalogModel[];
+  const live = await fetchLiveCatalogModels();
+  if (!live) return bundled;
+  const merged = new Map(bundled.map((model) => [model.id, model]));
+  for (const model of live) if (!merged.has(model.id)) merged.set(model.id, model);
+  return [...merged.values()];
 }

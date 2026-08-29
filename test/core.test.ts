@@ -102,6 +102,38 @@ test("OpenRouter login rejects non-key text", async () => {
   } finally { database.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("OpenRouter lists live catalog models with batch variants and reasoning levels", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "email-manager-test-"));
+  const database = new AppDatabase(join(directory, "test.sqlite"), directory);
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (input) => {
+      assert.equal(String(input), "https://openrouter.ai/api/v1/models");
+      return new Response(JSON.stringify({ data: [{
+        id: "brand-new/model-9", name: "Brand New: Model 9", context_length: 200000,
+        pricing: { prompt: "0.000001", completion: "0.000002", input_cache_read: "0" },
+        top_provider: { max_completion_tokens: 64000 },
+        supported_parameters: ["reasoning_effort"], reasoning: { supported_efforts: ["high", "low", "none"] },
+      }] }), { status: 200, headers: { "Content-Type": "application/json" } });
+    };
+    const service = new OpenRouterService(database);
+    const models = await service.listModels();
+    const live = models.find((item) => item.id === "brand-new/model-9");
+    assert.ok(live);
+    assert.deepEqual(live.reasoningLevels, ["off", "low", "high"]);
+    assert.deepEqual(models.find((item) => item.id === "brand-new/model-9:batch"), { ...live, id: "brand-new/model-9:batch", batch: true });
+    assert.ok(models.some((item) => item.id === "aion-labs/aion-2.0"), "bundled catalog stays listed");
+    const resolved = await service.listModels("brand-new");
+    assert.ok(resolved.every((item) => item.id.includes("brand-new")));
+  } finally {
+    globalThis.fetch = originalFetch;
+    database.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+// The batch test below runs with the live-models cache pre-warmed by the test above,
+// so its /api/v1/models mock response is only a safety net for cache expiry.
 test("OpenRouter authenticates batch submission and polling", async () => {
   const directory = mkdtempSync(join(tmpdir(), "email-manager-test-"));
   const database = new AppDatabase(join(directory, "test.sqlite"), directory);
@@ -109,12 +141,14 @@ test("OpenRouter authenticates batch submission and polling", async () => {
   const requests: Array<{ url: string; init?: RequestInit }> = [];
   try {
     const service = new OpenRouterService(database);
-    const model = service.listModels().find((item) => item.batch);
+    const model = (await service.listModels()).find((item) => item.batch);
     assert.ok(model);
     database.updateSettings({ modelProvider: "openrouter", modelId: model.id });
     await service.login("sk-or-test-key-123456789");
     globalThis.fetch = async (input, init) => {
-      requests.push({ url: String(input), init });
+      const url = String(input);
+      if (url.includes("/api/v1/models")) return new Response(JSON.stringify({ data: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+      requests.push({ url, init });
       if (requests.length === 1) return new Response(JSON.stringify({ id: "batch-test", status: "validating" }), { status: 202, headers: { "Content-Type": "application/json" } });
       if (requests.length === 2) return new Response(JSON.stringify({ error: { message: "Batch job batch-test not found." } }), { status: 404, headers: { "Content-Type": "application/json" } });
       return new Response(JSON.stringify({ id: "batch-test", status: "completed", results: [{ custom_id: "mail", error: "expected test result" }] }), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -125,7 +159,9 @@ test("OpenRouter authenticates batch submission and polling", async () => {
     }]);
     assert.equal(results[0]?.error, "expected test result");
     assert.equal(requests.length, 3);
-    for (const request of requests) assert.equal(new Headers(request.init?.headers).get("Authorization"), "Bearer sk-or-test-key-123456789");
+    for (const request of requests) {
+      assert.equal(new Headers(request.init?.headers).get("Authorization"), "Bearer sk-or-test-key-123456789");
+    }
   } finally {
     globalThis.fetch = originalFetch;
     database.close();
