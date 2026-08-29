@@ -12,6 +12,7 @@
   let scanRunId = null;
   let scanBaseline = 0;
   let candidateSort = 'start';
+  let lastPendingCount = null;
 
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
   const button = (text, kind = '', attributes = '') => `<button class="button ${kind}" ${attributes}>${text}</button>`;
@@ -98,6 +99,37 @@
     notify.timer = setTimeout(() => toast.classList.remove('show'), 4500);
   };
 
+  // Reflects the pending-review count as a red dot (app badge + in-app nav pill) and fires
+  // a browser notification when new proposals arrive while the tab is in the background.
+  // Browser Notification/setAppBadge need a secure context (localhost or HTTPS); the title
+  // and nav pill work everywhere.
+  function updatePendingBadge(pendingCount) {
+    const pending = count(pendingCount);
+    if (window.Notification && Notification.permission === 'granted' && document.hidden && pending > (lastPendingCount ?? 0)) {
+      const announcement = new Notification('Calendar proposals ready', {
+        body: `${pending} event${pending === 1 ? '' : 's'} awaiting your review`,
+        tag: 'pending-events',
+      });
+      announcement.onclick = () => { window.focus(); navigate('candidates'); };
+    }
+    lastPendingCount = pending;
+    try {
+      if (pending && navigator.setAppBadge) navigator.setAppBadge(pending);
+      if (!pending && navigator.clearAppBadge) navigator.clearAppBadge();
+    } catch { /* Badge support varies by browser. */ }
+    document.title = pending ? `(${pending}) Signal Mail` : 'Signal Mail';
+    document.querySelectorAll('[data-nav-badge]').forEach((element) => {
+      element.hidden = !pending;
+      element.textContent = pending > 99 ? '99+' : String(pending);
+    });
+  }
+
+  // Browsers only allow requesting notification permission from a user gesture.
+  function armNotificationPermissionRequest() {
+    if (!window.Notification || Notification.permission !== 'default') return;
+    document.addEventListener('click', () => { Notification.requestPermission(); }, { once: true });
+  }
+
   async function api(path, options = {}) {
     let response;
     try {
@@ -121,7 +153,7 @@
   function shell(view) {
     const titles = { dashboard: 'Overview', candidates: 'Review queue', history: 'History', settings: 'Settings' };
     const nav = [['dashboard', '⌂', 'Overview'], ['candidates', '◈', 'Review queue'], ['history', '◷', 'History'], ['settings', '⚙', 'Settings']];
-    return `<div class="shell"><aside class="sidebar"><div class="brand"><i>✦</i> Signal Mail</div><nav>${nav.map(([id, icon, label]) => `<button class="${view === id ? 'active' : ''}" data-view="${id}"><span class="ico">${icon}</span>${label}</button>`).join('')}</nav><div class="side-foot">${button('Sign out', 'ghost', 'data-action="logout"')}</div></aside><section class="content"><header class="topbar"><div><div class="eyebrow">Email → Calendar</div><h1>${titles[view]}</h1></div></header><div id="view"><div class="loading"><span class="spinner"></span></div></div></section><nav class="mobile-nav">${nav.map(([id, , label]) => `<button class="${view === id ? 'active' : ''}" data-view="${id}">${label}</button>`).join('')}</nav></div>`;
+    return `<div class="shell"><aside class="sidebar"><div class="brand"><i>✦</i> Signal Mail</div><nav>${nav.map(([id, icon, label]) => `<button class="${view === id ? 'active' : ''}" data-view="${id}"><span class="ico">${icon}</span>${label}${id === 'candidates' ? '<span class="nav-badge" data-nav-badge hidden></span>' : ''}</button>`).join('')}</nav><div class="side-foot">${button('Sign out', 'ghost', 'data-action="logout"')}</div></aside><section class="content"><header class="topbar"><div><div class="eyebrow">Email → Calendar</div><h1>${titles[view]}</h1></div></header><div id="view"><div class="loading"><span class="spinner"></span></div></div></section><nav class="mobile-nav">${nav.map(([id, , label]) => `<button class="${view === id ? 'active' : ''}" data-view="${id}">${label}${id === 'candidates' ? '<span class="nav-badge" data-nav-badge hidden></span>' : ''}</button>`).join('')}</nav></div>`;
   }
 
   function bindShell() {
@@ -178,6 +210,7 @@
   }
 
   function renderDashboard(status, queue, pending) {
+    updatePendingBadge(pending.length);
     const runTotal = count(queue.runTotal) || count(queue.queued) + count(queue.processing) + count(queue.runCompleted);
     const runCompleted = count(queue.runCompleted);
     const progress = runTotal ? Math.min(100, Math.round((runCompleted / runTotal) * 100)) : 0;
@@ -227,6 +260,7 @@
   async function candidates(status) {
     const data = await api(`/api/candidates?status=${status}`);
     const rows = Array.isArray(data) ? data : [];
+    if (status === 'pending') updatePendingBadge(rows.length);
     const sortChoices = [
       ['start', 'Event date · soonest'],
       ['startNewest', 'Event date · latest'],
@@ -811,6 +845,7 @@
   }
 
   async function openWorkspace() {
+    armNotificationPermissionRequest();
     try {
       const status = await api('/api/dashboard');
       if (!status.setupComplete) await wizardForStatus(status);

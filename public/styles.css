@@ -77,6 +77,9 @@ a { color: #79adff; }
 .brand i { color: var(--blue); font-style: normal; }
 .sidebar nav { display: grid; gap: 7px; }
 .sidebar nav button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 11px 13px;
   border: 0;
   border-radius: 12px;
@@ -245,6 +248,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green); box-shadow: 0 0 9px #3e9c78; }
 .dot.paused { background: var(--yellow); box-shadow: 0 0 9px #8f7239; }
 .dot.route { background: var(--blue); box-shadow: 0 0 9px #3b6fb5; }
+.nav-badge { margin-left: auto; min-width: 18px; padding: 1px 6px; border-radius: 9px; background: var(--red); color: #fff; font-size: 11px; font-weight: 700; line-height: 16px; text-align: center; }
+.mobile-nav .nav-badge { margin-left: 6px; }
 .notice.route { border-color: #36404d; border-left-color: var(--blue); }
 
 dialog.datetime-modal {
