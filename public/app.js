@@ -7,9 +7,11 @@
   let boot = {};
   let current = 'dashboard';
   let poller;
+  let pollerFast = false;
   let loginPoller;
   let scanRunId = null;
   let scanBaseline = 0;
+  let candidateSort = 'start';
 
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
   const button = (text, kind = '', attributes = '') => `<button class="button ${kind}" ${attributes}>${text}</button>`;
@@ -18,6 +20,75 @@
     if (!value) return 'Not available';
     const date = new Date(value);
     return Number.isNaN(date.valueOf()) ? String(value) : date.toLocaleString();
+  };
+  const sortTime = (value, empty) => {
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? empty : parsed;
+  };
+  const eventWhen = (candidate) => {
+    if (!candidate.start) return 'Time to be confirmed';
+    const start = formatDate(candidate.start);
+    const end = candidate.end ? formatDate(candidate.end) : '';
+    const zone = candidate.timezone ? ` · ${candidate.timezone}` : '';
+    return end ? `${start} – ${end}${zone}` : `${start}${zone}`;
+  };
+  const candidateMeta = (candidate) => {
+    const parts = [];
+    if (candidate.location) parts.push(candidate.location);
+    if (candidate.organizer) parts.push(candidate.organizer);
+    if (candidate.registrationUrl) parts.push(candidate.registrationUrl);
+    parts.push(`${Math.round((Number(candidate.confidence) || 0) * 100)}% confidence`);
+    return parts.join(' · ');
+  };
+  const sortCandidates = (rows, sort) => {
+    const copy = rows.slice();
+    const byTitle = (left, right) => String(left.title || '').localeCompare(String(right.title || ''), undefined, { sensitivity: 'base' });
+    const comparators = {
+      start: (left, right) => sortTime(left.start, Number.POSITIVE_INFINITY) - sortTime(right.start, Number.POSITIVE_INFINITY) || byTitle(left, right),
+      startNewest: (left, right) => sortTime(right.start, Number.NEGATIVE_INFINITY) - sortTime(left.start, Number.NEGATIVE_INFINITY) || byTitle(left, right),
+      recent: (left, right) => sortTime(right.updatedAt, 0) - sortTime(left.updatedAt, 0),
+      title: byTitle,
+      confidence: (left, right) => (Number(right.confidence) || 0) - (Number(left.confidence) || 0) || byTitle(left, right),
+      kind: (left, right) => String(left.changeKind || '').localeCompare(String(right.changeKind || '')) || sortTime(left.start, Number.POSITIVE_INFINITY) - sortTime(right.start, Number.POSITIVE_INFINITY),
+    };
+    copy.sort(comparators[sort] || comparators.start);
+    return copy;
+  };
+  const resolvedZone = (timeZone) => {
+    try {
+      Intl.DateTimeFormat('en-US', { timeZone }).format(new Date());
+      return timeZone;
+    } catch {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone;
+    }
+  };
+  const tzParts = (date, timeZone) => {
+    try {
+      const parts = {};
+      for (const part of new Intl.DateTimeFormat('en-US', {
+        timeZone: resolvedZone(timeZone), hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+      }).formatToParts(date)) {
+        if (part.type !== 'literal') parts[part.type] = part.value;
+      }
+      return { year: Number(parts.year), month: Number(parts.month), day: Number(parts.day), hour: Number(parts.hour) % 24, minute: Number(parts.minute), second: Number(parts.second) };
+    } catch {
+      return { year: date.getFullYear(), month: date.getMonth() + 1, day: date.getDate(), hour: date.getHours(), minute: date.getMinutes(), second: date.getSeconds() };
+    }
+  };
+  const wallTimeToIso = (year, month, day, hour, minute, timeZone) => {
+    const utcGuess = Date.UTC(year, month - 1, day, hour, minute, 0);
+    const offsetAt = (timestamp) => {
+      const parts = tzParts(new Date(timestamp), timeZone);
+      return Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second) - timestamp;
+    };
+    const once = utcGuess - offsetAt(utcGuess);
+    return new Date(utcGuess - offsetAt(once)).toISOString();
+  };
+  const formatPickerLabel = (value, timeZone) => {
+    if (!value) return 'Choose date and time';
+    const date = new Date(value);
+    if (Number.isNaN(date.valueOf())) return String(value);
+    return date.toLocaleString(undefined, { timeZone: resolvedZone(timeZone), weekday: 'short', month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
   };
   const notify = (text, isError = false) => {
     toast.textContent = text;
@@ -78,58 +149,278 @@
   }
 
   async function dashboard() {
+    clearInterval(poller);
     const [status, queue, pending] = await Promise.all([
       api('/api/dashboard'),
       api('/api/queue'),
       api('/api/candidates?status=pending').catch(() => []),
     ]);
     renderDashboard(status, queue, Array.isArray(pending) ? pending : []);
-    poller = setInterval(async () => {
+    const poll = async () => {
       if (current !== 'dashboard') return;
       try {
         const [latestStatus, latestQueue, latestPending] = await Promise.all([api('/api/dashboard'), api('/api/queue'), api('/api/candidates?status=pending').catch(() => [])]);
         renderDashboard(latestStatus, latestQueue, Array.isArray(latestPending) ? latestPending : []);
+        const fast = queueActive(latestQueue, latestStatus);
+        if (pollerFast !== fast) {
+          clearInterval(poller);
+          poller = setInterval(poll, fast ? 1000 : 30000);
+          pollerFast = fast;
+        }
       } catch { /* Leave the last useful status visible. */ }
-    }, 30000);
+    };
+    pollerFast = queueActive(queue, status);
+    poller = setInterval(poll, pollerFast ? 1000 : 30000);
+  }
+
+  function queueActive(queue, status) {
+    return !queue.paused && (queue.running || status.scanRunning || count(queue.queued) > 0 || count(queue.processing) > 0 || queue.batchState === 'in_route' || queue.batchState === 'preparing' || queue.batchState === 'applying');
   }
 
   function renderDashboard(status, queue, pending) {
-    const queueTotal = count(queue.queued) + count(queue.processing) + count(queue.processed) + count(queue.failed);
-    const progress = queueTotal ? Math.round((count(queue.processed) / queueTotal) * 100) : 0;
-    setView(`<div class="grid stats"><div class="card stat"><div class="label">Awaiting review</div><div class="num blue">${count(status.pendingCount)}</div></div><div class="card stat"><div class="label">Queued messages</div><div class="num yellow">${count(status.queuedCount)}</div></div><div class="card stat"><div class="label">Processing now</div><div class="num green">${count(queue.processing)}</div></div><div class="card stat"><div class="label">Failed messages</div><div class="num">${count(status.failedCount)}</div></div></div><div class="grid split section"><section class="card"><div class="section-head"><div><h2>Needs your attention</h2><p class="muted">${status.setupComplete ? 'Review proposed calendar changes before they are applied.' : 'Finish setup to begin reviewing meeting suggestions.'}</p></div>${button(status.setupComplete ? 'Open queue' : 'Finish setup', 'primary', 'data-go="candidates"')}</div>${candidateList(pending, true)}</section><section class="card"><div class="section-head"><h2>Queue control</h2><div class="queuebar"><span class="dot ${queue.paused ? 'paused' : ''}"></span>${queue.paused ? 'Paused' : status.scanRunning ? 'Scanning' : 'Running'}</div></div><p class="muted">${count(queue.queued)} queued · ${count(queue.processing)} processing · ${count(queue.processed)} processed · ${count(queue.failed)} failed</p><div class="progress"><span style="width:${progress}%"></span></div><small class="muted">Last successful scan: ${esc(formatDate(status.lastSuccessfulScan))}<br>Next scan: ${esc(status.nextScan || 'Not scheduled')}</small><div class="actions section">${queue.paused ? button('Resume queue', 'good', 'data-queue="resume"') : button('Pause queue', 'ghost', 'data-queue="pause"')}${button('Scan now', 'primary', 'data-scan-now')}</div>${status.lastError ? `<div class="notice error">${esc(status.lastError)}</div>` : ''}</section></div><section class="card section connection-card"><h2>Connections</h2><p class="muted">Google: ${status.googleConnected ? 'Connected' : 'Not connected'} · OpenAI: ${status.openaiConnected ? 'Connected' : 'Not connected'}</p></section>`);
+    const runTotal = count(queue.runTotal) || count(queue.queued) + count(queue.processing) + count(queue.runCompleted);
+    const runCompleted = count(queue.runCompleted);
+    const progress = runTotal ? Math.min(100, Math.round((runCompleted / runTotal) * 100)) : 0;
+    const batchRoute = queue.batchMode && (queue.batchState === 'in_route' || queue.batchState === 'preparing' || queue.batchState === 'applying' || queue.batchMessage);
+    const showBar = !queue.batchMode && queueActive(queue, status);
+    const stateLabel = queue.paused ? 'Paused' : queue.batchState === 'in_route' ? 'Batch in route' : queue.batchState === 'preparing' ? 'Preparing batch' : status.scanRunning || queue.running ? 'Running' : 'Idle';
+    const batchNotice = queue.batchMode && queue.batchMessage ? `<div class="notice ${queue.batchState === 'in_route' ? 'route' : ''}">${esc(queue.batchMessage)}</div>` : '';
+    const progressBlock = batchRoute
+      ? batchNotice
+      : showBar
+        ? `<div class="progress-label"><strong>Queue progress</strong><span>${runCompleted} of ${runTotal}</span></div><div class="progress" role="progressbar" aria-label="Queue progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}"><span style="width:${progress}%"></span></div>${batchNotice}`
+        : batchNotice;
+    setView(`<div class="grid stats"><div class="card stat"><div class="label">Awaiting review</div><div class="num blue">${count(status.pendingCount)}</div></div><div class="card stat"><div class="label">Queued messages</div><div class="num yellow">${count(status.queuedCount)}</div></div><div class="card stat"><div class="label">Processing now</div><div class="num green">${count(queue.processing)}</div></div><div class="card stat"><div class="label">Failed messages</div><div class="num">${count(status.failedCount)}</div></div></div><div class="grid split section"><section class="card"><div class="section-head"><div><h2>Needs your attention</h2><p class="muted">${status.setupComplete ? 'Review proposed calendar changes before they are applied.' : 'Finish setup to begin reviewing meeting suggestions.'}</p></div>${button(status.setupComplete ? 'Open queue' : 'Finish setup', 'primary', 'data-go="candidates"')}</div>${candidateList(pending, true)}</section><section class="card"><div class="section-head"><h2>Queue control</h2><div class="queuebar"><span class="dot ${queue.paused ? 'paused' : queue.batchState === 'in_route' ? 'route' : ''}"></span>${esc(stateLabel)}</div></div><p class="muted">${count(queue.queued)} queued · ${count(queue.processing)} processing · ${count(queue.processed)} processed · ${count(queue.failed)} failed</p>${progressBlock}<small class="muted">Last successful scan: ${esc(formatDate(status.lastSuccessfulScan))}<br>Next scan: ${esc(status.nextScan || 'Not scheduled')}</small><div class="actions section">${queue.paused ? button('Resume queue', 'good', 'data-queue="resume"') : button('Pause queue', 'ghost', 'data-queue="pause"')}${count(queue.failed) ? button('Retry failed messages', 'ghost', 'data-retry-failed') : ''}${button('Scan now', 'primary', 'data-scan-now')}</div>${status.lastError ? `<div class="notice error">${esc(status.lastError)}</div>` : ''}</section></div><section class="card section connection-card"><h2>Connections</h2><p class="muted">Google: ${status.googleConnected ? 'Connected' : 'Not connected'} · OpenAI Codex: ${status.openaiConnected ? 'Connected' : 'Not connected'} · OpenRouter: ${status.openrouterConnected ? 'Connected' : 'Not connected'}</p></section>`);
     document.querySelector('[data-go]')?.addEventListener('click', () => status.setupComplete ? navigate('candidates') : wizardForStatus(status));
     document.querySelector('[data-queue]')?.addEventListener('click', queueAction);
+    document.querySelector('[data-retry-failed]')?.addEventListener('click', retryFailedMessages);
     document.querySelector('[data-scan-now]')?.addEventListener('click', scanNow);
   }
 
   function candidateList(rows, compact = false) {
     if (!rows.length) return '<div class="empty">Nothing needs review right now.</div>';
-    return rows.slice(0, compact ? 4 : 100).map((candidate) => `<article class="item ${compact ? '' : 'candidate'}"><span class="tag ${esc(candidate.changeKind)}">${esc(candidate.changeKind || 'create')}</span><div class="item-body"><div class="item-title">${esc(candidate.title || 'Untitled event')}</div><p>${esc(candidate.start ? `${formatDate(candidate.start)}${candidate.timezone ? ` · ${candidate.timezone}` : ''}` : 'Time to be confirmed')}</p></div>${compact ? '' : `<div class="actions">${button('Review', 'ghost', `data-review="${Number(candidate.id)}"`)}</div>`}</article>`).join('');
+    return rows.slice(0, compact ? 4 : 100).map((candidate) => {
+      const id = Number(candidate.id);
+      const kind = esc(candidate.changeKind || 'create');
+      const title = esc(candidate.title || 'Untitled event');
+      if (compact) {
+        return `<article class="item"><span class="tag ${kind}">${kind}</span><div class="item-body"><div class="item-title">${title}</div><p>${esc(eventWhen(candidate))}</p></div></article>`;
+      }
+      const pending = candidate.status === 'pending';
+      const actions = `<div class="actions">${pending ? `${button('Approve', 'good', `data-approve="${id}"`)}${button('Deny', 'danger', `data-deny="${id}"`)}` : ''}${button('Review', 'ghost', `data-review="${id}"`)}</div>`;
+      return `<article class="item candidate"><div class="item-body"><div class="item-head"><span class="tag ${kind}">${kind}</span><div class="item-title">${title}</div></div><p>${esc(eventWhen(candidate))}</p><p>${esc(candidateMeta(candidate))}</p><p class="item-desc">${esc(candidate.description || 'No description provided.')}</p></div>${actions}</article>`;
+    }).join('');
+  }
+
+  function bindCandidateList(rows) {
+    document.querySelectorAll('[data-review]').forEach((element) => {
+      element.onclick = () => review(rows.find((item) => Number(item.id) === Number(element.dataset.review)));
+    });
+    document.querySelectorAll('[data-approve]').forEach((element) => {
+      element.onclick = () => decision(Number(element.dataset.approve), 'approve');
+    });
+    document.querySelectorAll('[data-deny]').forEach((element) => {
+      element.onclick = () => decision(Number(element.dataset.deny), 'deny');
+    });
   }
 
   async function candidates(status) {
     const data = await api(`/api/candidates?status=${status}`);
     const rows = Array.isArray(data) ? data : [];
-    setView(`<section class="card"><div class="section-head"><div><h2>${status === 'pending' ? 'Proposed calendar changes' : 'Decision history'}</h2><p class="muted">${status === 'pending' ? 'Create, update, and cancellation requests are clearly labelled for review.' : 'Approved, denied, and superseded proposals.'}</p></div>${status === 'pending' ? button('Scan inbox', 'primary', 'data-scan-now') : ''}</div>${candidateList(rows)}</section>`);
-    document.querySelectorAll('[data-review]').forEach((element) => { element.onclick = () => review(rows.find((item) => Number(item.id) === Number(element.dataset.review))); });
-    document.querySelector('[data-scan-now]')?.addEventListener('click', scanNow);
+    const sortChoices = [
+      ['start', 'Event date · soonest'],
+      ['startNewest', 'Event date · latest'],
+      ['recent', 'Recently proposed'],
+      ['title', 'Title A–Z'],
+      ['confidence', 'Highest confidence'],
+      ['kind', 'Change type'],
+    ];
+    const renderList = () => {
+      const sorted = sortCandidates(rows, candidateSort);
+      const sortSelect = `<label class="sort-control"><span>Sort</span><select id="candidate-sort">${sortChoices.map(([value, label]) => `<option value="${esc(value)}" ${candidateSort === value ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select></label>`;
+      setView(`<section class="card"><div class="section-head"><div><h2>${status === 'pending' ? 'Proposed calendar changes' : 'Decision history'}</h2><p class="muted">${status === 'pending' ? 'Create, update, and cancellation requests are clearly labelled for review.' : 'Approved, denied, and superseded proposals.'}</p></div><div class="queue-tools">${sortSelect}${status === 'pending' ? button('Scan inbox', 'primary', 'data-scan-now') : ''}</div></div>${candidateList(sorted)}</section>`);
+      bindCandidateList(sorted);
+      document.querySelector('[data-scan-now]')?.addEventListener('click', scanNow);
+      document.querySelector('#candidate-sort').onchange = (event) => {
+        candidateSort = event.target.value;
+        renderList();
+      };
+    };
+    renderList();
+  }
+
+  function datetimeField(id, label, value, timeZone) {
+    return `<div class="field"><label for="${id}-trigger">${esc(label)}</label><button type="button" id="${id}-trigger" class="datetime-trigger${value ? '' : ' empty'}" aria-haspopup="dialog" aria-expanded="false"><span>${esc(formatPickerLabel(value, timeZone))}</span><b aria-hidden="true">▾</b></button><input id="${id}" type="hidden" value="${esc(value || '')}"></div>`;
+  }
+
+  function bindDatetimePickers() {
+    const start = document.querySelector('#cstart');
+    const end = document.querySelector('#cend');
+    const view = document.querySelector('#view');
+    if (!start || !end || !view) return;
+    const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    view.insertAdjacentHTML('beforeend', `<dialog id="datetime-dialog" class="datetime-modal card" aria-labelledby="datetime-title"><div class="section-head"><h2 id="datetime-title">Choose date and time</h2>${button('Cancel', 'ghost', 'data-datetime-close type="button"')}</div><div class="cal-head"><div class="cal-month-year"><select id="datetime-month" aria-label="Month"></select><select id="datetime-year" aria-label="Year"></select></div><div class="cal-head-nav">${button('‹', 'ghost', 'data-datetime-prev type="button" aria-label="Previous month"')}${button('›', 'ghost', 'data-datetime-next type="button" aria-label="Next month"')}</div></div><div class="cal-weekdays">${weekdays.map((day) => `<span>${esc(day)}</span>`).join('')}</div><div id="datetime-grid" class="cal-grid" role="grid"></div><div class="datetime-time"><span>Time</span><select id="datetime-hour" aria-label="Hour"></select><span class="datetime-colon">:</span><select id="datetime-minute" aria-label="Minute"></select><select id="datetime-meridiem" aria-label="AM or PM"><option value="AM">AM</option><option value="PM">PM</option></select></div><div class="actions section datetime-actions">${button('Clear', 'ghost', 'data-datetime-clear type="button"')}${button('Apply', 'primary', 'data-datetime-apply type="button"')}</div></dialog>`);
+    const dialog = document.querySelector('#datetime-dialog');
+    const title = document.querySelector('#datetime-title');
+    const monthSelect = document.querySelector('#datetime-month');
+    const yearSelect = document.querySelector('#datetime-year');
+    const hourSelect = document.querySelector('#datetime-hour');
+    const minuteSelect = document.querySelector('#datetime-minute');
+    const meridiemSelect = document.querySelector('#datetime-meridiem');
+    const grid = document.querySelector('#datetime-grid');
+    const state = { fieldId: 'cstart', viewYear: 0, viewMonth: 1, selected: { year: 0, month: 1, day: 1, hour: 9, minute: 0 } };
+    monthSelect.innerHTML = Array.from({ length: 12 }, (_, index) => `<option value="${index + 1}">${esc(new Date(2000, index, 1).toLocaleString(undefined, { month: 'long' }))}</option>`).join('');
+    hourSelect.innerHTML = Array.from({ length: 12 }, (_, index) => `<option value="${index + 1}">${index + 1}</option>`).join('');
+    const zone = () => document.querySelector('#ctimezone')?.value || Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const pad = (value) => String(value).padStart(2, '0');
+    const syncLabels = () => {
+      ['cstart', 'cend'].forEach((id) => {
+        const input = document.querySelector(`#${id}`);
+        const trigger = document.querySelector(`#${id}-trigger`);
+        if (!input || !trigger) return;
+        trigger.classList.toggle('empty', !input.value);
+        trigger.querySelector('span').textContent = formatPickerLabel(input.value, zone());
+      });
+    };
+    const fillMinutes = (current) => {
+      const steps = new Set(Array.from({ length: 12 }, (_, index) => index * 5));
+      if (Number.isInteger(current)) steps.add(current);
+      minuteSelect.innerHTML = [...steps].sort((left, right) => left - right).map((minute) => `<option value="${minute}">${pad(minute)}</option>`).join('');
+      minuteSelect.value = String(current);
+    };
+    const fillYears = (selectedYear) => {
+      const nowYear = tzParts(new Date(), zone()).year;
+      const years = new Set();
+      for (let year = nowYear - 2; year <= nowYear + 12; year += 1) years.add(year);
+      years.add(selectedYear);
+      yearSelect.innerHTML = [...years].sort((left, right) => left - right).map((year) => `<option value="${year}">${year}</option>`).join('');
+      yearSelect.value = String(selectedYear);
+    };
+    const selectedKey = () => `${state.selected.year}-${state.selected.month}-${state.selected.day}`;
+    const renderGrid = () => {
+      const firstWeekday = new Date(state.viewYear, state.viewMonth - 1, 1).getDay();
+      const daysHere = new Date(state.viewYear, state.viewMonth, 0).getDate();
+      const today = tzParts(new Date(), zone());
+      const todayKey = `${today.year}-${today.month}-${today.day}`;
+      const cells = [];
+      for (let index = firstWeekday; index > 0; index -= 1) {
+        const date = new Date(state.viewYear, state.viewMonth - 1, 1 - index);
+        cells.push({ year: date.getFullYear(), month: date.getMonth() + 1, day: date.getDate(), outside: true });
+      }
+      for (let day = 1; day <= daysHere; day += 1) cells.push({ year: state.viewYear, month: state.viewMonth, day, outside: false });
+      while (cells.length < 42) {
+        const extra = cells.length - firstWeekday - daysHere + 1;
+        const date = new Date(state.viewYear, state.viewMonth, extra);
+        cells.push({ year: date.getFullYear(), month: date.getMonth() + 1, day: date.getDate(), outside: true });
+      }
+      grid.innerHTML = cells.map((cell) => {
+        const key = `${cell.year}-${cell.month}-${cell.day}`;
+        const classes = ['cal-day', cell.outside ? 'outside' : '', key === selectedKey() ? 'selected' : '', key === todayKey ? 'today' : ''].filter(Boolean).join(' ');
+        return `<button type="button" class="${classes}" role="gridcell" aria-pressed="${key === selectedKey()}" data-year="${cell.year}" data-month="${cell.month}" data-day="${cell.day}" aria-label="${esc(`${cell.year}-${pad(cell.month)}-${pad(cell.day)}`)}">${cell.day}</button>`;
+      }).join('');
+      grid.querySelectorAll('button').forEach((buttonEl) => {
+        buttonEl.onclick = () => {
+          state.selected.year = Number(buttonEl.dataset.year);
+          state.selected.month = Number(buttonEl.dataset.month);
+          state.selected.day = Number(buttonEl.dataset.day);
+          state.viewYear = state.selected.year;
+          state.viewMonth = state.selected.month;
+          monthSelect.value = String(state.viewMonth);
+          fillYears(state.viewYear);
+          renderGrid();
+        };
+      });
+    };
+    const setViewMonth = (year, month) => {
+      const shifted = new Date(year, month - 1, 1);
+      state.viewYear = shifted.getFullYear();
+      state.viewMonth = shifted.getMonth() + 1;
+      monthSelect.value = String(state.viewMonth);
+      fillYears(state.viewYear);
+      renderGrid();
+    };
+    const readTime = () => {
+      const hour12 = Number(hourSelect.value) || 12;
+      const meridiem = meridiemSelect.value === 'PM' ? 'PM' : 'AM';
+      const hour = meridiem === 'AM' ? hour12 % 12 : (hour12 % 12) + 12;
+      const minute = Number(minuteSelect.value) || 0;
+      return { hour, minute };
+    };
+    const closePicker = () => { dialog.close(); };
+    const openPicker = (fieldId, label) => {
+      state.fieldId = fieldId;
+      title.textContent = label;
+      const input = document.querySelector(`#${fieldId}`);
+      const current = input?.value;
+      const fallback = fieldId === 'cend' && start.value ? new Date(new Date(start.value).getTime() + 60 * 60 * 1000) : new Date();
+      const source = current && !Number.isNaN(Date.parse(current)) ? new Date(current) : fallback;
+      const parts = tzParts(Number.isNaN(source.valueOf()) ? new Date() : source, zone());
+      if (!current) {
+        parts.minute = Math.round(parts.minute / 5) * 5;
+        if (parts.minute === 60) { parts.minute = 0; parts.hour = (parts.hour + 1) % 24; }
+      }
+      state.selected = { year: parts.year, month: parts.month, day: parts.day, hour: parts.hour, minute: parts.minute };
+      state.viewYear = parts.year;
+      state.viewMonth = parts.month;
+      monthSelect.value = String(parts.month);
+      fillYears(parts.year);
+      fillMinutes(parts.minute);
+      const hour12 = parts.hour % 12 || 12;
+      hourSelect.value = String(hour12);
+      meridiemSelect.value = parts.hour < 12 ? 'AM' : 'PM';
+      renderGrid();
+      document.querySelector(`#${fieldId}-trigger`)?.setAttribute('aria-expanded', 'true');
+      dialog.showModal();
+    };
+    document.querySelector('#cstart-trigger').onclick = () => openPicker('cstart', 'Start');
+    document.querySelector('#cend-trigger').onclick = () => openPicker('cend', 'End');
+    document.querySelector('#ctimezone')?.addEventListener('change', syncLabels);
+    document.querySelector('#ctimezone')?.addEventListener('input', syncLabels);
+    monthSelect.onchange = () => setViewMonth(state.viewYear, Number(monthSelect.value));
+    yearSelect.onchange = () => setViewMonth(Number(yearSelect.value), state.viewMonth);
+    dialog.querySelector('[data-datetime-prev]').onclick = () => setViewMonth(state.viewYear, state.viewMonth - 1);
+    dialog.querySelector('[data-datetime-next]').onclick = () => setViewMonth(state.viewYear, state.viewMonth + 1);
+    dialog.querySelector('[data-datetime-close]').onclick = closePicker;
+    dialog.querySelector('[data-datetime-clear]').onclick = () => {
+      const input = document.querySelector(`#${state.fieldId}`);
+      if (input) input.value = '';
+      syncLabels();
+      closePicker();
+    };
+    dialog.querySelector('[data-datetime-apply]').onclick = () => {
+      const time = readTime();
+      const input = document.querySelector(`#${state.fieldId}`);
+      if (input) input.value = wallTimeToIso(state.selected.year, state.selected.month, state.selected.day, time.hour, time.minute, zone());
+      syncLabels();
+      closePicker();
+    };
+    dialog.addEventListener('click', (event) => {
+      const box = dialog.getBoundingClientRect();
+      if (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom) closePicker();
+    });
+    dialog.addEventListener('close', () => {
+      document.querySelectorAll('.datetime-trigger').forEach((trigger) => trigger.setAttribute('aria-expanded', 'false'));
+    });
   }
 
   async function review(candidate) {
     if (!candidate) return;
     const kind = candidate.changeKind || 'create';
     const explanation = kind === 'cancel' ? 'Cancel removes the related calendar event after approval.' : kind === 'update' ? 'Update changes the related calendar event after approval.' : 'Create adds a new calendar event after approval.';
-    setView(`<section class="card"><div class="section-head"><div><span class="tag ${esc(kind)}">${esc(kind)}</span><h2 style="margin-top:10px">${esc(candidate.title)}</h2><p class="muted">${esc(explanation)}</p></div>${button('Back', 'ghost', 'data-back')}</div><div class="notice">Check every proposed detail before approving this ${esc(kind)} request.</div><div class="form-grid"><div class="field"><label for="ctitle">Title</label><input id="ctitle" value="${esc(candidate.title)}"></div><div class="field"><label for="ccalendar">Destination calendar</label><select id="ccalendar"><option value="${esc(candidate.calendarId)}">${esc(candidate.calendarId || 'Choose a calendar')}</option></select></div><div class="field"><label for="cstart">Start</label><input id="cstart" value="${esc(candidate.start || '')}" placeholder="ISO date/time or blank"></div><div class="field"><label for="cend">End</label><input id="cend" value="${esc(candidate.end || '')}" placeholder="ISO date/time or blank"></div><div class="field"><label for="ctimezone">Timezone</label><input id="ctimezone" value="${esc(candidate.timezone)}"></div><div class="field"><label for="clocation">Location</label><input id="clocation" value="${esc(candidate.location)}"></div><div class="field"><label for="corganizer">Organizer</label><input id="corganizer" value="${esc(candidate.organizer)}"></div><div class="field"><label for="curl">Registration URL</label><input id="curl" type="url" value="${esc(candidate.registrationUrl)}"></div><div class="field wide"><label for="cdescription">Description</label><textarea id="cdescription" rows="5">${esc(candidate.description)}</textarea></div></div><div class="detail-grid"><div><b>Confidence</b><span>${esc(`${Math.round((Number(candidate.confidence) || 0) * 100)}%`)}</span></div><div><b>Uncertainty</b><span>${esc((candidate.uncertaintyNotes || []).join(' · ') || 'None noted')}</span></div><div><b>Sources</b><span>${esc((candidate.sourceMessageIds || []).join(', ') || 'No message IDs recorded')}</span></div><div><b>Source excerpt</b><span>${esc(candidate.sourceExcerpt || 'Not available')}</span></div></div><div class="actions section">${button(kind === 'cancel' ? 'Approve cancellation' : kind === 'update' ? 'Approve update' : 'Approve & create', 'good', 'data-approve')}${button('Deny proposal', 'danger', 'data-deny')}</div></section>`);
+    setView(`<section class="card"><div class="section-head"><div><span class="tag ${esc(kind)}">${esc(kind)}</span><h2 style="margin-top:10px">${esc(candidate.title)}</h2><p class="muted">${esc(explanation)}</p></div>${button('Back', 'ghost', 'data-back')}</div><div class="notice">Check every proposed detail before approving this ${esc(kind)} request.</div><div class="form-grid"><div class="field"><label for="ctitle">Title</label><input id="ctitle" value="${esc(candidate.title)}"></div><div class="field"><label for="ccalendar">Destination calendar</label><select id="ccalendar"><option value="${esc(candidate.calendarId)}">${esc(candidate.calendarId || 'Choose a calendar')}</option></select></div>${datetimeField('cstart', 'Start', candidate.start, candidate.timezone)}${datetimeField('cend', 'End', candidate.end, candidate.timezone)}<div class="field"><label for="ctimezone">Timezone</label><input id="ctimezone" value="${esc(candidate.timezone)}"></div><div class="field"><label for="clocation">Location</label><input id="clocation" value="${esc(candidate.location)}"></div><div class="field"><label for="corganizer">Organizer</label><input id="corganizer" value="${esc(candidate.organizer)}"></div><div class="field"><label for="curl">Registration URL</label><input id="curl" type="url" value="${esc(candidate.registrationUrl)}"></div><div class="field wide"><label for="cdescription">Description</label><textarea id="cdescription" rows="5">${esc(candidate.description)}</textarea></div></div><div class="detail-grid"><div><b>Confidence</b><span>${esc(`${Math.round((Number(candidate.confidence) || 0) * 100)}%`)}</span></div><div><b>Uncertainty</b><span>${esc((candidate.uncertaintyNotes || []).join(' · ') || 'None noted')}</span></div><div><b>Sources</b><span>${esc((candidate.sourceMessageIds || []).join(', ') || 'No message IDs recorded')}</span></div><div><b>Source excerpt</b><span>${esc(candidate.sourceExcerpt || 'Not available')}</span></div></div><div class="actions section">${button(kind === 'cancel' ? 'Approve cancellation' : kind === 'update' ? 'Approve update' : 'Approve & create', 'good', 'data-approve')}${button('Deny proposal', 'danger', 'data-deny')}</div></section>`);
     document.querySelector('[data-back]').onclick = () => navigate('candidates');
     document.querySelector('[data-approve]').onclick = () => decision(candidate.id, 'approve');
     document.querySelector('[data-deny]').onclick = () => decision(candidate.id, 'deny');
+    bindDatetimePickers();
     api('/api/google/calendars').then((calendars) => fillSelect('ccalendar', calendars, candidate.calendarId)).catch(() => {});
   }
 
   async function decision(id, action) {
+    const controls = [...document.querySelectorAll('[data-approve], [data-deny]')];
+    controls.forEach((element) => { element.disabled = true; });
     try {
-      if (action === 'approve') {
-        const value = (id) => document.querySelector(`#${id}`).value;
+      if (action === 'approve' && document.querySelector('#ctitle')) {
+        const value = (fieldId) => document.querySelector(`#${fieldId}`).value;
         await api(`/api/candidates/${id}`, { method: 'PATCH', body: JSON.stringify({
           title: value('ctitle'), calendarId: value('ccalendar'), start: value('cstart') || null, end: value('cend') || null,
           timezone: value('ctimezone'), location: value('clocation'), organizer: value('corganizer'), registrationUrl: value('curl'), description: value('cdescription'),
@@ -138,11 +429,21 @@
       await api(`/api/candidates/${id}/${action}`, { method: 'POST' });
       notify(action === 'approve' ? 'Calendar change approved.' : 'Proposal denied.');
       navigate('candidates');
-    } catch (error) { notify(error.message, true); }
+    } catch (error) {
+      controls.forEach((element) => { element.disabled = false; });
+      notify(error.message, true);
+    }
   }
 
   async function queueAction(event) {
     try { await api(`/api/queue/${event.currentTarget.dataset.queue}`, { method: 'POST' }); await dashboard(); } catch (error) { notify(error.message, true); }
+  }
+  async function retryFailedMessages() {
+    try {
+      const result = await api('/api/queue/retry-failed', { method: 'POST' });
+      notify(`${count(result.retried)} failed message${count(result.retried) === 1 ? '' : 's'} returned to the queue.`);
+      await dashboard();
+    } catch (error) { notify(error.message, true); }
   }
   async function scanNow() {
     try { const result = await api('/api/scan/now', { method: 'POST' }); notify(`${count(result.queuedCount)} message${count(result.queuedCount) === 1 ? '' : 's'} queued for scanning.`); } catch (error) { notify(error.message, true); }
@@ -187,21 +488,93 @@
     choose(selectedId);
   }
 
+  function setupSearchSelect(rootId, items, selectedId, placeholder = 'Choose a model') {
+    const root = document.querySelector(`#${rootId}`);
+    if (!root) return;
+    const trigger = root.querySelector('.custom-select-trigger');
+    const label = trigger.querySelector('span');
+    const menu = root.querySelector('.custom-select-menu');
+    const options = root.querySelector('.model-options');
+    const filter = root.querySelector('.model-filter');
+    const input = root.querySelector('input[type="hidden"]');
+    const render = (query = '') => {
+      const needle = query.trim().toLowerCase();
+      const list = (Array.isArray(items) ? items : []).filter((item) => !needle || `${item.name || ''} ${item.id}`.toLowerCase().includes(needle));
+      options.innerHTML = list.map((item) => `<button type="button" role="option" data-id="${esc(item.id)}" aria-selected="${item.id === input.value}"><span>${esc(item.name || item.id)}</span>${item.batch ? '<small>Batch</small>' : ''}</button>`).join('') || '<div class="custom-select-empty">No matching models.</div>';
+      options.querySelectorAll('[role="option"]').forEach((option) => { option.onclick = () => choose(option.dataset.id); });
+    };
+    const choose = (id) => {
+      const selected = items.find((item) => item.id === id);
+      input.value = selected?.id || '';
+      label.textContent = selected ? selected.name || selected.id : placeholder;
+      render(filter?.value || '');
+      menu.hidden = true;
+      trigger.setAttribute('aria-expanded', 'false');
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    trigger.onclick = () => {
+      menu.hidden = !menu.hidden;
+      trigger.setAttribute('aria-expanded', String(!menu.hidden));
+      if (!menu.hidden) { render(filter?.value || ''); filter?.focus(); }
+    };
+    if (filter) {
+      filter.oninput = () => render(filter.value);
+      filter.onclick = (event) => event.stopPropagation();
+    }
+    root.onkeydown = (event) => {
+      if (event.key === 'Escape') { menu.hidden = true; trigger.setAttribute('aria-expanded', 'false'); trigger.focus(); }
+    };
+    if (filter) filter.value = '';
+    render('');
+    choose(selectedId);
+  }
+
+  async function loadProviderModels(provider, status) {
+    if (provider === 'openrouter') return api('/api/openrouter/models').catch(() => []);
+    if (!status.openaiConnected) return [];
+    return api('/api/openai/models').catch(() => []);
+  }
+
+  function modelSelectMarkup(id, hiddenId, placeholder) {
+    return `<div id="${id}" class="custom-select"><button type="button" class="custom-select-trigger" aria-haspopup="listbox" aria-expanded="false"><span>${esc(placeholder)}</span><b aria-hidden="true">⌄</b></button><div class="custom-select-menu" role="listbox" hidden><input class="model-filter" type="search" placeholder="Search models" autocomplete="off"><div class="model-options"></div></div><input id="${hiddenId}" name="${hiddenId}" type="hidden"></div>`;
+  }
+
   async function settings() {
     const [saved, status] = await Promise.all([api('/api/settings'), api('/api/dashboard')]);
-    const [labels, calendars, models] = await Promise.all([
+    const provider = saved.modelProvider === 'openrouter' ? 'openrouter' : 'openai-codex';
+    let models = [];
+    const [labels, calendars, loadedModels] = await Promise.all([
       status.googleConnected ? api('/api/google/labels').catch(() => []) : Promise.resolve([]),
       status.googleConnected ? api('/api/google/calendars').catch(() => []) : Promise.resolve([]),
-      status.openaiConnected ? api('/api/openai/models').catch(() => []) : Promise.resolve([]),
+      loadProviderModels(provider, status),
     ]);
-    setView(`<section class="card"><div class="section-head"><div><h2>Workspace settings</h2><p class="muted">Choose sources, scheduling, and the model used to prepare proposals.</p></div></div><form id="settings-form"><div class="form-grid"><div class="field"><label for="scanTime">Daily scan time</label><input id="scanTime" name="scanTime" type="time" value="${esc(saved.scanTime)}"></div><div class="field"><label for="timezone">Timezone</label><input id="timezone" name="timezone" value="${esc(saved.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone)}"></div><div class="field"><label for="gmailLabelIds">Gmail labels</label><select id="gmailLabelIds" name="gmailLabelIds" multiple ${status.googleConnected ? '' : 'disabled'}>${optionMarkup(labels, saved.gmailLabelIds, status.googleConnected ? 'No label selected' : 'Connect Google first')}</select><small class="muted">Use Ctrl/Cmd to select multiple labels.</small></div><div class="field"><label for="calendarId">Destination calendar</label><select id="calendarId" name="calendarId" ${status.googleConnected ? '' : 'disabled'}>${optionMarkup(calendars, saved.calendarId, status.googleConnected ? 'Choose a calendar' : 'Connect Google first')}</select></div><div class="field"><label for="modelId">OpenAI model</label><select id="modelId" name="modelId" ${status.openaiConnected ? '' : 'disabled'}>${optionMarkup(models, saved.modelId, status.openaiConnected ? 'Choose a model' : 'Connect OpenAI first')}</select></div><div class="field"><label for="reasoningLevel">Reasoning level</label><select id="reasoningLevel" name="reasoningLevel"></select></div><div class="field wide"><label for="interests">Interests & context</label><textarea id="interests" name="interests" rows="4">${esc(saved.interests)}</textarea></div><div class="field wide"><label for="filterRules">Filter rules</label><textarea id="filterRules" name="filterRules" rows="4" placeholder="Describe emails or events to ignore.">${esc(saved.filterRules)}</textarea></div><div class="field"><label><input id="scanPaused" name="scanPaused" type="checkbox" ${saved.scanPaused ? 'checked' : ''}> Pause queue processing</label></div></div>${button('Save settings', 'primary', 'type="submit"')}</form></section>`);
+    models = loadedModels;
+    setView(`<section class="card"><div class="section-head"><div><h2>Workspace settings</h2><p class="muted">Choose sources, scheduling, and the model used to prepare proposals.</p></div></div><form id="settings-form"><div class="form-grid"><div class="field"><label for="scanTime">Daily scan time</label><input id="scanTime" name="scanTime" type="time" value="${esc(saved.scanTime)}"></div><div class="field"><label for="timezone">Timezone</label><input id="timezone" name="timezone" value="${esc(saved.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone)}"></div><div class="field"><label for="gmailLabelIds">Gmail labels</label><select id="gmailLabelIds" name="gmailLabelIds" multiple ${status.googleConnected ? '' : 'disabled'}>${optionMarkup(labels, saved.gmailLabelIds, status.googleConnected ? 'No label selected' : 'Connect Google first')}</select><small class="muted">Use Ctrl/Cmd to select multiple labels.</small></div><div class="field"><label for="calendarId">Destination calendar</label><select id="calendarId" name="calendarId" ${status.googleConnected ? '' : 'disabled'}>${optionMarkup(calendars, saved.calendarId, status.googleConnected ? 'Choose a calendar' : 'Connect Google first')}</select></div><div class="field wide"><span class="field-label">Model provider</span><div class="provider-toggle" role="radiogroup" aria-label="Model provider"><label class="choice"><input type="radio" name="modelProvider" value="openai-codex" ${provider === 'openai-codex' ? 'checked' : ''}><span>OpenAI Codex ${status.openaiConnected ? '(connected)' : '(not connected)'}</span></label><label class="choice"><input type="radio" name="modelProvider" value="openrouter" ${provider === 'openrouter' ? 'checked' : ''}><span>OpenRouter ${status.openrouterConnected ? '(connected)' : '(not connected)'}</span></label></div><small class="muted">OpenRouter uses its own API key and does not replace a Codex login.</small></div><div id="openrouter-key-field" class="field wide" ${provider === 'openrouter' ? '' : 'hidden'}><label for="openrouterKey">OpenRouter API key</label><div class="key-row"><input id="openrouterKey" type="password" autocomplete="new-password" spellcheck="false" placeholder="${status.openrouterConnected ? 'Saved · enter a new key to replace it' : 'sk-or-v1-...'}"><button type="button" class="button" data-or-save>Save key</button></div></div><div class="field"><label>Model</label>${modelSelectMarkup('model-select', 'modelId', 'Choose a model')}</div><div class="field"><label for="reasoningLevel">Reasoning level</label><select id="reasoningLevel" name="reasoningLevel"></select></div><div class="field wide"><label for="interests">Interests & context</label><textarea id="interests" name="interests" rows="4">${esc(saved.interests)}</textarea></div><div class="field wide"><label for="filterRules">Filter rules</label><textarea id="filterRules" name="filterRules" rows="4" placeholder="Describe emails or events to ignore.">${esc(saved.filterRules)}</textarea></div><div class="field"><label><input id="scanPaused" name="scanPaused" type="checkbox" ${saved.scanPaused ? 'checked' : ''}> Pause queue processing</label></div></div>${button('Save settings', 'primary', 'type="submit"')}</form></section>`);
+    const selectedProvider = () => document.querySelector('input[name="modelProvider"]:checked')?.value || 'openai-codex';
     const updateReasoning = () => {
       const model = models.find((item) => item.id === document.querySelector('#modelId').value);
       const levels = model?.reasoningLevels?.length ? model.reasoningLevels : ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
       fillSelect('reasoningLevel', levels.map((level) => ({ id: level, name: level })), saved.reasoningLevel, 'Choose a level');
     };
-    updateReasoning();
+    const refreshModels = async () => {
+      const current = selectedProvider();
+      const keyField = document.querySelector('#openrouter-key-field');
+      if (keyField) keyField.hidden = current !== 'openrouter';
+      models = await loadProviderModels(current, status);
+      setupSearchSelect('model-select', models, saved.modelId, models.length ? 'Choose a model' : 'Connect this provider to load models');
+      updateReasoning();
+    };
+    await refreshModels();
+    document.querySelectorAll('input[name="modelProvider"]').forEach((input) => { input.onchange = () => { void refreshModels(); }; });
     document.querySelector('#modelId')?.addEventListener('change', updateReasoning);
+    document.querySelector('[data-or-save]')?.addEventListener('click', async () => {
+      try {
+        await api('/api/openrouter/login', { method: 'POST', body: JSON.stringify({ apiKey: document.querySelector('#openrouterKey').value }) });
+        status.openrouterConnected = true;
+        notify('OpenRouter API key saved. Codex login is unchanged.');
+        await refreshModels();
+      } catch (error) { notify(error.message, true); }
+    });
     document.querySelector('#settings-form').onsubmit = async (event) => {
       event.preventDefault();
       try {
@@ -209,7 +582,7 @@
         const payload = {
           scanTime: form.scanTime.value, timezone: form.timezone.value,
           gmailLabelIds: Array.from(form.gmailLabelIds.selectedOptions).map((option) => option.value).filter(Boolean),
-          calendarId: form.calendarId.value, modelId: form.modelId.value, reasoningLevel: form.reasoningLevel.value,
+          calendarId: form.calendarId.value, modelProvider: selectedProvider(), modelId: form.modelId.value, reasoningLevel: form.reasoningLevel.value,
           interests: form.interests.value, filterRules: form.filterRules.value, scanPaused: form.scanPaused.checked,
         };
         await api('/api/settings', { method: 'PATCH', body: JSON.stringify(payload) });
@@ -232,7 +605,7 @@
 
   async function wizardForStatus(status) {
     if (!status.googleConnected) return wizard(1);
-    if (!status.openaiConnected) return wizard(2);
+    if (!status.openaiConnected && !status.openrouterConnected) return wizard(2);
     return wizard(4);
   }
 
@@ -245,11 +618,11 @@
     const pages = {
       1: `<h1>Connect Google</h1><p class="sub">Upload your OAuth client credentials, then authorize Gmail and Calendar access.</p><p class="setup-help"><a href="https://console.cloud.google.com/apis/credentials/oauthclient" target="_blank" rel="noopener noreferrer">Create a Google OAuth client ↗</a></p><div class="oauth-guide"><div><span>Application type</span><strong>Web application</strong></div><div><span>Name</span><strong>Signal Mail</strong></div><div><span>Authorized JavaScript origins</span><strong>Leave empty</strong></div><div class="wide"><span>Authorized redirect URI</span><code>${esc(googleCallbackUrl)}</code></div></div><p class="setup-note">If Google asks for a consent screen, choose <strong>External</strong>, keep it in testing, and add your Google account as a test user.</p><div class="file"><div class="file-copy"><span class="file-title">Google OAuth client JSON</span><span id="client-name" class="file-name">No file selected</span></div><label class="button ghost file-picker" for="client">Choose file</label><input id="client" class="visually-hidden" type="file" accept="application/json,.json"></div><div class="actions section">${button('Upload credentials', 'ghost', 'data-upload')}${button('Connect Google', 'primary', 'data-connect')}</div>`,
       2: `<h1>Choose sources</h1><p class="sub">Select one or more Gmail labels and the calendar where approved events belong.</p><div class="form-grid source-grid"><div class="field"><span class="field-label">Gmail labels</span><div id="label" class="choice-list" role="group" aria-label="Gmail labels"></div></div><div class="field"><label for="calendar-trigger">Destination calendar</label><div id="calendar-select" class="custom-select"><button id="calendar-trigger" class="custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false"><span>Choose a calendar</span><b aria-hidden="true">⌄</b></button><div class="custom-select-menu" role="listbox" hidden></div><input id="calendar" type="hidden"></div></div></div>`,
-      3: `<h1>Connect OpenAI</h1><p class="sub">Use your OpenAI subscription to understand email context and suggest calendar changes.</p><div class="actions">${button('Sign in in browser', 'primary', 'data-oai="browser"')}${button('Use device code', 'ghost', 'data-oai="device_code"')}</div><div id="oauth-note" class="section" aria-live="polite"></div><div class="form-grid section"><div class="field"><label for="model">Model</label><select id="model"><option value="">Connect OpenAI to load models</option></select></div><div class="field"><label for="reasoning">Reasoning level</label><select id="reasoning"></select></div></div>`,
+      3: `<h1>Connect a model provider</h1><p class="sub">Use a ChatGPT subscription or an OpenRouter API key. Each login is stored separately, so connecting OpenRouter does not replace Codex.</p><div class="provider-toggle" role="radiogroup" aria-label="Model provider"><label class="choice"><input type="radio" name="modelProvider" value="openai-codex" ${saved.modelProvider !== 'openrouter' ? 'checked' : ''}><span>OpenAI Codex</span></label><label class="choice"><input type="radio" name="modelProvider" value="openrouter" ${saved.modelProvider === 'openrouter' ? 'checked' : ''}><span>OpenRouter</span></label></div><div id="codex-pane"><div class="actions">${button('Sign in in browser', 'primary', 'data-oai="browser"')}${button('Use device code', 'ghost', 'data-oai="device_code"')}</div><div id="oauth-note" class="section" aria-live="polite"></div></div><div id="openrouter-pane" hidden><div class="field"><label for="openrouterKey">OpenRouter API key</label><input id="openrouterKey" type="password" autocomplete="off" placeholder="sk-or-v1-..."></div><div class="actions">${button('Save API key', 'primary', 'data-or-login')}</div><div id="or-note" class="section" aria-live="polite"></div></div><div class="form-grid section"><div class="field"><label>Model</label>${modelSelectMarkup('model-select', 'model', 'Connect a provider to load models')}</div><div class="field"><label for="reasoning">Reasoning level</label><select id="reasoning"></select></div></div>`,
       4: `<h1>Tailor your assistant</h1><p class="sub">Set a daily scan time and context so suggestions match your working style.</p><div class="form-grid"><div class="field"><label for="scanTime">Daily scan time</label><input id="scanTime" type="time" value="${esc(saved.scanTime || '09:00')}"></div><div class="field"><label for="timezone">Timezone</label><input id="timezone" value="${esc(saved.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone)}"></div><div class="field wide"><label for="interests">Interests & context</label><textarea id="interests" rows="4">${esc(saved.interests || '')}</textarea></div><div class="field wide"><label for="filterRules">Filter rules</label><textarea id="filterRules" rows="4">${esc(saved.filterRules || '')}</textarea></div></div>`,
       5: `<h1>Initial inbox scan</h1><p class="sub">We’ll count messages in your chosen labels before any processing begins.</p><div id="count" class="notice">Counting eligible messages…</div><div id="initial-progress" class="scan-progress" hidden><div class="progress-label"><strong>Processing email</strong><span id="initial-progress-count">0 of 0</span></div><div class="progress" role="progressbar" aria-label="Initial scan progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span style="width:0%"></span></div><p id="initial-progress-detail" class="muted">Starting three parallel workers…</p></div>`,
     };
-    app.innerHTML = `<div class="wizard card"><div class="brand"><i>✦</i> Signal Mail</div><div class="steps">${['Google', 'Sources', 'OpenAI', 'Preferences', 'Scan'].map((label, index) => `<div class="step ${index + 1 === step ? 'active' : index + 1 < step ? 'done' : ''}"><b>${index + 1}</b>${label}</div>`).join('')}</div><div class="wizard-page active">${pages[step]}</div><div class="wizard-footer">${step > 1 ? button('Back', 'ghost', 'data-prev') : ''}<span></span>${step < 5 ? button('Continue', 'primary', 'data-next') : button('Confirm & start scan', 'primary', 'data-finish')}</div></div>`;
+    app.innerHTML = `<div class="wizard card"><div class="brand"><i>✦</i> Signal Mail</div><div class="steps">${['Google', 'Sources', 'Model', 'Preferences', 'Scan'].map((label, index) => `<div class="step ${index + 1 === step ? 'active' : index + 1 < step ? 'done' : ''}"><b>${index + 1}</b>${label}</div>`).join('')}</div><div class="wizard-page active">${pages[step]}</div><div class="wizard-footer">${step > 1 ? button('Back', 'ghost', 'data-prev') : ''}<span></span>${step < 5 ? button('Continue', 'primary', 'data-next') : button('Confirm & start scan', 'primary', 'data-finish')}</div></div>`;
     document.querySelector('[data-prev]')?.addEventListener('click', () => wizard(step - 1));
     document.querySelector('[data-next]')?.addEventListener('click', async () => {
       try {
@@ -264,10 +637,14 @@
           await api('/api/settings', { method: 'PATCH', body: JSON.stringify({ gmailLabelIds, calendarId }) });
         }
         if (step === 3) {
+          const modelProvider = document.querySelector('input[name="modelProvider"]:checked')?.value || 'openai-codex';
           const modelId = document.querySelector('#model').value;
           const reasoningLevel = document.querySelector('#reasoning').value;
-          if (!modelId) throw new Error('Wait for OpenAI to connect, then choose a model.');
-          await api('/api/settings', { method: 'PATCH', body: JSON.stringify({ modelId, reasoningLevel }) });
+          if (!modelId) throw new Error('Wait for a provider to connect, then choose a model.');
+          const status = await api('/api/dashboard');
+          if (modelProvider === 'openrouter' && !status.openrouterConnected) throw new Error('Save an OpenRouter API key first.');
+          if (modelProvider !== 'openrouter' && !status.openaiConnected) throw new Error('Connect OpenAI Codex first.');
+          await api('/api/settings', { method: 'PATCH', body: JSON.stringify({ modelProvider, modelId, reasoningLevel }) });
         }
         if (step === 4) await api('/api/settings', { method: 'PATCH', body: JSON.stringify({ scanTime: document.querySelector('#scanTime').value, timezone: document.querySelector('#timezone').value, interests: document.querySelector('#interests').value, filterRules: document.querySelector('#filterRules').value }) });
         wizard(step + 1);
@@ -306,7 +683,7 @@
       document.querySelector('#label').innerHTML = labels.map((label) => `<label class="choice"><input type="checkbox" value="${esc(label.id)}" ${selected.has(label.id) ? 'checked' : ''}><span>${esc(label.name || label.id)}</span></label>`).join('') || '<span class="muted">No labels found.</span>';
       setupCustomSelect(calendars, saved.calendarId);
     }).catch((error) => notify(error.message, true));
-    if (step === 3) setupOpenAiStep(saved);
+    if (step === 3) setupModelStep(saved);
     if (step === 5) Promise.all([api('/api/scan/count', { method: 'POST' }), api('/api/queue')]).then(([result, queue]) => {
       scanRunId = result.runId;
       scanBaseline = count(queue.processed) + count(queue.failed);
@@ -339,11 +716,12 @@
         fill.style.width = `${percent}%`;
         bar.setAttribute('aria-valuenow', String(percent));
         const dashboard = await api('/api/dashboard').catch(() => ({}));
-        const queueLine = queue.paused
-          ? `Paused · ${count(queue.queued)} queued · ${count(queue.processing)} processing`
-          : count(queue.processing) === 0 && count(queue.queued) > 0 && completed === 0
-            ? `Collecting message IDs from Gmail… ${count(queue.queued)} queued`
-            : `${count(queue.processing)} processing · ${count(queue.queued)} queued${count(queue.failed) ? ` · ${count(queue.failed)} failed` : ''}`;
+        const queueLine = queue.batchMessage
+          || (queue.paused
+            ? `Paused · ${count(queue.queued)} queued · ${count(queue.processing)} processing`
+            : count(queue.processing) === 0 && count(queue.queued) > 0 && completed === 0
+              ? `Collecting message IDs from Gmail… ${count(queue.queued)} queued`
+              : `${count(queue.processing)} processing · ${count(queue.queued)} queued${count(queue.failed) ? ` · ${count(queue.failed)} failed` : ''}`);
         detail.textContent = dashboard.lastError ? `${queueLine}. ${dashboard.lastError}` : queueLine;
         if (started && remaining === 0) {
           clearInterval(poller);
@@ -372,41 +750,63 @@
     return `${lines || emptyState}${error ? `<div class="notice error">${esc(error)}</div>` : ''}${state === 'connected' ? '<div class="notice">OpenAI connected. Models are ready to choose.</div>' : ''}`;
   }
 
-  async function setupOpenAiStep(saved) {
+  async function setupModelStep(saved) {
     const note = document.querySelector('#oauth-note');
+    const orNote = document.querySelector('#or-note');
+    const dashboardStatus = await api('/api/dashboard').catch(() => ({ openaiConnected: false, openrouterConnected: false }));
+    let models = [];
+    const selectedProvider = () => document.querySelector('input[name="modelProvider"]:checked')?.value || 'openai-codex';
+    const showProvider = (provider) => {
+      const codexPane = document.querySelector('#codex-pane');
+      const orPane = document.querySelector('#openrouter-pane');
+      if (codexPane) codexPane.hidden = provider !== 'openai-codex';
+      if (orPane) orPane.hidden = provider !== 'openrouter';
+    };
+    const updateReasoning = () => {
+      const selected = models.find((model) => model.id === document.querySelector('#model')?.value);
+      const levels = selected?.reasoningLevels?.length ? selected.reasoningLevels : ['off'];
+      fillSelect('reasoning', levels.map((level) => ({ id: level, name: level })), saved.reasoningLevel, 'Choose a level');
+    };
     const populateModels = async () => {
-      const models = await api('/api/openai/models');
-      fillSelect('model', models, saved.modelId, 'Choose a model');
-      const updateReasoning = () => {
-        const selected = models.find((model) => model.id === document.querySelector('#model').value);
-        const levels = selected?.reasoningLevels?.length ? selected.reasoningLevels : ['off'];
-        fillSelect('reasoning', levels.map((level) => ({ id: level, name: level })), saved.reasoningLevel, 'Choose a level');
-      };
+      models = await loadProviderModels(selectedProvider(), dashboardStatus);
+      setupSearchSelect('model-select', models, saved.modelId, models.length ? 'Choose a model' : 'Connect a provider to load models');
+      const modelInput = document.querySelector('#model');
+      if (modelInput) modelInput.onchange = updateReasoning;
       updateReasoning();
-      document.querySelector('#model').onchange = updateReasoning;
     };
     const inspect = async () => {
       const status = await api('/api/openai/login');
-      note.innerHTML = authEvents(status.events, status.state, status.error);
-      if (status.state === 'connected') { clearInterval(loginPoller); await populateModels(); }
+      if (note) note.innerHTML = authEvents(status.events, status.state, status.error);
+      if (status.state === 'connected') { dashboardStatus.openaiConnected = true; clearInterval(loginPoller); await populateModels(); }
       if (status.state === 'failed') clearInterval(loginPoller);
     };
+    showProvider(selectedProvider());
+    document.querySelectorAll('input[name="modelProvider"]').forEach((input) => {
+      input.onchange = () => { showProvider(input.value); void populateModels(); };
+    });
     try {
       await inspect();
-      const dashboardStatus = await api('/api/dashboard');
-      if (dashboardStatus.openaiConnected && !document.querySelector('#model').options.length) await populateModels();
-      if (dashboardStatus.openaiConnected && document.querySelector('#model').options.length === 1 && !document.querySelector('#model').value) await populateModels();
+      if (dashboardStatus.openaiConnected || dashboardStatus.openrouterConnected) await populateModels();
     } catch { /* Login is optional until the user starts it. */ }
+    if (orNote && dashboardStatus.openrouterConnected) orNote.innerHTML = '<div class="notice">OpenRouter API key saved. Codex login is unchanged.</div>';
     document.querySelectorAll('[data-oai]').forEach((element) => {
       element.onclick = async () => {
         try {
           const status = await api('/api/openai/login', { method: 'POST', body: JSON.stringify({ method: element.dataset.oai }) });
-          note.innerHTML = authEvents(status.events, status.state, status.error);
+          if (note) note.innerHTML = authEvents(status.events, status.state, status.error);
           clearInterval(loginPoller);
-          if (status.state === 'connected') await populateModels();
-          else loginPoller = setInterval(() => inspect().catch((error) => { note.innerHTML = authEvents([], 'failed', error.message); clearInterval(loginPoller); }), 2000);
+          if (status.state === 'connected') { dashboardStatus.openaiConnected = true; await populateModels(); }
+          else loginPoller = setInterval(() => inspect().catch((error) => { if (note) note.innerHTML = authEvents([], 'failed', error.message); clearInterval(loginPoller); }), 2000);
         } catch (error) { notify(error.message, true); }
       };
+    });
+    document.querySelector('[data-or-login]')?.addEventListener('click', async () => {
+      try {
+        await api('/api/openrouter/login', { method: 'POST', body: JSON.stringify({ apiKey: document.querySelector('#openrouterKey').value }) });
+        dashboardStatus.openrouterConnected = true;
+        if (orNote) orNote.innerHTML = '<div class="notice">OpenRouter API key saved. Codex login is unchanged.</div>';
+        await populateModels();
+      } catch (error) { notify(error.message, true); }
     });
   }
 

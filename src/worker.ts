@@ -1,6 +1,9 @@
 import type { AppDatabase } from "./database.js";
 import type { GoogleService } from "./google.js";
 import type { OpenAIService } from "./openai.js";
+import type { EmailForModel } from "./classify.js";
+import { isOpenRouterBatchSettings } from "./openrouter.js";
+import type { QueueStatus } from "./types.js";
 
 /** Coordinates Gmail discovery, persistent queue processing, and daily scheduling. */
 export class ScanWorker {
@@ -8,6 +11,11 @@ export class ScanWorker {
   #filling = false;
   #timer: NodeJS.Timeout | null = null;
   #lastError: string | null = null;
+  #batchState: QueueStatus["batchState"] = "idle";
+  #batchMessage: string | null = null;
+  #runTotal = 0;
+  #runCompleted = 0;
+  #providerCompleted = 0;
 
   public constructor(private readonly database: AppDatabase, private readonly google: GoogleService, private readonly openai: OpenAIService) {}
 
@@ -23,7 +31,12 @@ export class ScanWorker {
   public stop(): void { if (this.#timer) clearInterval(this.#timer); this.#timer = null; }
 
   /** Returns transient worker state for the dashboard. */
-  public status(): { running: boolean; lastError: string | null } { return { running: this.#processing, lastError: this.#lastError }; }
+  public status(): { running: boolean; lastError: string | null; batchState: QueueStatus["batchState"]; batchMessage: string | null; runTotal: number; runCompleted: number; providerCompleted: number } {
+    return {
+      running: this.#processing, lastError: this.#lastError, batchState: this.#batchState, batchMessage: this.#batchMessage,
+      runTotal: this.#runTotal, runCompleted: this.#runCompleted, providerCompleted: this.#providerCompleted,
+    };
+  }
 
   /** Counts the initial Gmail corpus and creates a confirmation checkpoint. */
   public async countInitialScan(): Promise<{ runId: number; messageCount: number }> {
@@ -42,7 +55,7 @@ export class ScanWorker {
     return { queuedCount: run.message_count };
   }
 
-  /** Discovers the confirmed initial messages while three consumers classify IDs as they land. */
+  /** Discovers the confirmed initial messages while consumers classify IDs as they land. */
   private async runInitialScan(runId: number): Promise<void> {
     this.#filling = true;
     void this.processQueue();
@@ -82,18 +95,109 @@ export class ScanWorker {
     }
   }
 
-  /** Processes up to three queued messages concurrently until paused or empty. */
+  /** Processes the durable queue using streaming workers or one full OpenRouter batch. */
   public async processQueue(): Promise<void> {
     if (this.#processing || this.database.getSettings().scanPaused) return;
     this.#processing = true;
+    this.#runCompleted = 0;
+    this.#providerCompleted = 0;
+    try {
+      if (isOpenRouterBatchSettings(this.database.getSettings())) await this.processBatchQueue();
+      else await this.processStreamingQueue();
+    } finally {
+      this.#processing = false;
+      this.#batchState = "idle";
+    }
+  }
+
+  /** Submits every queued message in one OpenRouter Batch API request. */
+  private async processBatchQueue(): Promise<void> {
+    this.#batchState = "preparing";
+    this.#batchMessage = "Collecting the full queue for one OpenRouter batch…";
+    while (this.#filling && !this.database.getSettings().scanPaused) {
+      const queue = this.database.getQueueStatus();
+      this.#runTotal = queue.queued + queue.processing;
+      this.#batchMessage = `Collecting the full queue for one OpenRouter batch… ${this.#runTotal} messages so far.`;
+      await sleep(400);
+    }
+    if (this.database.getSettings().scanPaused) return;
+    const claimed = this.database.claimAllQueued();
+    this.#runTotal = claimed.length;
+    this.#runCompleted = 0;
+    if (!claimed.length) {
+      this.#batchMessage = null;
+      return;
+    }
+    this.#batchMessage = `Preparing ${claimed.length} messages for OpenRouter batch…`;
+    const emails: EmailForModel[] = [];
+    for (const message of claimed) {
+      if (this.database.getSettings().scanPaused && emails.length === 0) {
+        this.database.reclaimProcessing();
+        return;
+      }
+      try {
+        emails.push(await this.google.getMessage(message.gmailId));
+      } catch (error) {
+        this.#lastError = errorText(error);
+        this.database.finishMessage(message.gmailId, this.#lastError);
+        this.#runCompleted += 1;
+      }
+    }
+    if (!emails.length) {
+      this.#batchMessage = "Batch finished with Gmail fetch errors.";
+      return;
+    }
+    this.#batchState = "in_route";
+    this.#batchMessage = `Full batch in route — ${emails.length} messages submitted to OpenRouter.`;
+    try {
+      const results = await this.openai.openrouter.classifyEmails(emails, (progress) => {
+        this.#providerCompleted = progress.completed;
+        this.#runTotal = Math.max(this.#runTotal, progress.total);
+        this.#batchMessage = `Full batch in route — ${progress.total} messages submitted to OpenRouter.`;
+      });
+      this.#batchState = "applying";
+      this.#batchMessage = "Applying batch results…";
+      const calendarId = this.database.getSettings().calendarId;
+      for (const result of results) {
+        if (result.error) this.database.finishMessage(result.emailId, result.error);
+        else {
+          for (const event of result.events) this.database.saveCandidate(event.draft, result.emailId, event.fingerprint, calendarId, event.changeKind, event.relatedCandidateId);
+          this.database.finishMessage(result.emailId);
+          this.#lastError = null;
+        }
+        this.#runCompleted += 1;
+      }
+      this.#batchMessage = `Batch complete — ${emails.length} messages processed.`;
+    } catch (error) {
+      this.#lastError = errorText(error);
+      this.#batchMessage = this.#lastError;
+      if (/rate|quota|usage limit|429/i.test(this.#lastError)) {
+        this.database.reclaimProcessing();
+        this.database.updateSettings({ scanPaused: true });
+      } else {
+        for (const email of emails) this.database.finishMessage(email.id, this.#lastError);
+      }
+    }
+  }
+
+  /** Processes up to three queued messages concurrently until paused or empty. */
+  private async processStreamingQueue(): Promise<void> {
+    this.#batchState = "idle";
+    this.#batchMessage = null;
+    this.#runTotal = this.database.getQueueStatus().queued;
     let stop = false;
     const consume = async (): Promise<void> => {
       while (!stop && !this.database.getSettings().scanPaused) {
         const message = this.database.claimMessage();
         if (!message) {
-          if (this.#filling) { await new Promise((resolve) => setTimeout(resolve, 400)); continue; }
+          if (this.#filling) {
+            this.#runTotal = Math.max(this.#runTotal, this.database.getQueueStatus().queued + this.#runCompleted);
+            await sleep(400);
+            continue;
+          }
           return;
         }
+        this.#runTotal = Math.max(this.#runTotal, this.#runCompleted + this.database.getQueueStatus().queued + this.database.getQueueStatus().processing);
         try {
           const email = await this.google.getMessage(message.gmailId);
           const events = await this.openai.classifyEmail(email);
@@ -111,11 +215,11 @@ export class ScanWorker {
             this.database.finishMessage(message.gmailId, this.#lastError);
           }
         }
-        if (!stop) await new Promise((resolve) => setTimeout(resolve, 1500));
+        this.#runCompleted += 1;
+        if (!stop) await sleep(1500);
       }
     };
-    try { await Promise.all([consume(), consume(), consume()]); }
-    finally { this.#processing = false; }
+    await Promise.all([consume(), consume(), consume()]);
   }
 
   /** Runs due scheduled scans and resumes queue work. */
@@ -141,3 +245,8 @@ function localClock(timezone: string): { date: string; time: string } {
 
 /** Converts an unknown failure into bounded log text. */
 function errorText(error: unknown): string { return (error instanceof Error ? error.message : String(error)).slice(0, 1000); }
+
+/** Waits before the next queue claim or batch poll. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}

@@ -10,6 +10,9 @@ export type MessageStatus = "queued" | "processing" | "processed" | "failed";
 /** Supported model reasoning levels. */
 export type ReasoningLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
+/** Model backends that can classify email. */
+export type ModelProviderId = "openai-codex" | "openrouter";
+
 /** Editable event data produced by the model and reviewed by the user. */
 export interface EventDraft {
   title: string;
@@ -43,6 +46,7 @@ export interface AppSettings {
   scanTime: string;
   gmailLabelIds: string[];
   calendarId: string;
+  modelProvider: ModelProviderId;
   modelId: string;
   reasoningLevel: ReasoningLevel;
   interests: string;
@@ -55,6 +59,7 @@ export interface DashboardStatus {
   setupComplete: boolean;
   googleConnected: boolean;
   openaiConnected: boolean;
+  openrouterConnected: boolean;
   pendingCount: number;
   queuedCount: number;
   failedCount: number;
@@ -65,11 +70,12 @@ export interface DashboardStatus {
   lastError: string | null;
 }
 
-/** One model available through the connected OpenAI subscription. */
+/** One model available through the selected provider. */
 export interface AvailableModel {
   id: string;
   name: string;
   reasoningLevels: ReasoningLevel[];
+  batch: boolean;
 }
 
 /** Queue progress returned to the browser. */
@@ -79,4 +85,11 @@ export interface QueueStatus {
   processed: number;
   failed: number;
   paused: boolean;
+  running: boolean;
+  batchMode: boolean;
+  batchState: "idle" | "preparing" | "in_route" | "applying";
+  batchMessage: string | null;
+  runTotal: number;
+  runCompleted: number;
+  providerCompleted: number;
 }

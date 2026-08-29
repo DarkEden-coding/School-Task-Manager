@@ -9,6 +9,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   scanTime: "08:00",
   gmailLabelIds: ["INBOX"],
   calendarId: "",
+  modelProvider: "openai-codex",
   modelId: "",
   reasoningLevel: "medium",
   interests: "Engineering, robotics, hiking, and outdoor activities",
@@ -109,6 +110,11 @@ export class AppDatabase implements CredentialStore {
     return Number(this.db.prepare("UPDATE messages SET status='queued', updated_at=CURRENT_TIMESTAMP WHERE status='processing'").run().changes);
   }
 
+  /** Returns failed messages to the queue for a fresh set of attempts. */
+  public retryFailedMessages(): number {
+    return Number(this.db.prepare("UPDATE messages SET status='queued', attempts=0, last_error=NULL, updated_at=CURRENT_TIMESTAMP WHERE status='failed'").run().changes);
+  }
+
   /** Marks a message failed without retrying. */
   public failMessage(gmailId: string, error: string): void {
     this.db.prepare("UPDATE messages SET status='failed', last_error=?, updated_at=CURRENT_TIMESTAMP WHERE gmail_id=?").run(error.slice(0, 1000), gmailId);
@@ -129,7 +135,16 @@ export class AppDatabase implements CredentialStore {
   public getQueueStatus(): QueueStatus {
     const rows = this.db.prepare("SELECT status, COUNT(*) count FROM messages GROUP BY status").all() as Array<{ status: MessageStatus; count: number }>;
     const counts = Object.fromEntries(rows.map((row) => [row.status, row.count])) as Partial<Record<MessageStatus, number>>;
-    return { queued: counts.queued ?? 0, processing: counts.processing ?? 0, processed: counts.processed ?? 0, failed: counts.failed ?? 0, paused: this.getSettings().scanPaused };
+    return {
+      queued: counts.queued ?? 0, processing: counts.processing ?? 0, processed: counts.processed ?? 0, failed: counts.failed ?? 0,
+      paused: this.getSettings().scanPaused, running: false, batchMode: false, batchState: "idle", batchMessage: null, runTotal: 0, runCompleted: 0, providerCompleted: 0,
+    };
+  }
+
+  /** Claims every queued message for one full-queue batch submission. */
+  public claimAllQueued(): Array<{ gmailId: string; threadId: string; attempts: number }> {
+    const rows = this.db.prepare(`UPDATE messages SET status='processing', attempts=attempts+1, updated_at=CURRENT_TIMESTAMP WHERE status='queued' RETURNING gmail_id, thread_id, attempts`).all() as Array<{ gmail_id: string; thread_id: string; attempts: number }>;
+    return rows.map((row) => ({ gmailId: row.gmail_id, threadId: row.thread_id, attempts: row.attempts }));
   }
 
   /** Finds a candidate likely to represent the same event. */

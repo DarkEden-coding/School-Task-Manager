@@ -10,7 +10,8 @@ import type { AppDatabase } from "./database.js";
 import { assertApprovable } from "./event-validation.js";
 import type { GoogleService } from "./google.js";
 import type { OpenAIService } from "./openai.js";
-import type { AppSettings, EventDraft } from "./types.js";
+import { isOpenRouterBatchSettings } from "./openrouter.js";
+import type { AppSettings, EventDraft, ModelProviderId } from "./types.js";
 import type { ScanWorker } from "./worker.js";
 
 interface Services { database: AppDatabase; google: GoogleService; openai: OpenAIService; worker: ScanWorker; }
@@ -60,6 +61,7 @@ export async function createServer(config: RuntimeConfig, services: Services): P
       setupComplete: Boolean(services.database.getMarker("initialScanComplete")),
       googleConnected: services.google.isConnected(),
       openaiConnected: await services.openai.isConnected(),
+      openrouterConnected: await services.openai.isOpenRouterConnected(),
       pendingCount: services.database.listCandidates("pending").length,
       queuedCount: queue.queued,
       failedCount: queue.failed,
@@ -105,6 +107,14 @@ export async function createServer(config: RuntimeConfig, services: Services): P
   });
   app.get("/api/openai/login", sessionGuard, async () => services.openai.loginStatus());
   app.get("/api/openai/models", sessionGuard, async () => services.openai.listModels());
+  app.post("/api/openrouter/login", mutationGuard, async (request) => {
+    await services.openai.openrouter.login(stringBody(request.body, "apiKey"));
+    return { connected: true };
+  });
+  app.get("/api/openrouter/models", sessionGuard, async (request) => {
+    const query = typeof (request.query as { q?: unknown }).q === "string" ? (request.query as { q: string }).q : "";
+    return services.openai.openrouter.listModels(query);
+  });
 
   app.get("/api/candidates", sessionGuard, async (request) => {
     const status = (request.query as { status?: string }).status === "history" ? "history" : "pending";
@@ -136,9 +146,29 @@ export async function createServer(config: RuntimeConfig, services: Services): P
   app.post("/api/scan/count", mutationGuard, async () => services.worker.countInitialScan());
   app.post("/api/scan/confirm", mutationGuard, async (request) => services.worker.confirmInitialScan(Number((request.body as { runId?: number }).runId)));
   app.post("/api/scan/now", mutationGuard, async () => services.worker.scanNow("manual"));
-  app.get("/api/queue", sessionGuard, async () => services.database.getQueueStatus());
+  app.get("/api/queue", sessionGuard, async () => {
+    const queue = services.database.getQueueStatus();
+    const worker = services.worker.status();
+    const settings = services.database.getSettings();
+    return {
+      ...queue,
+      paused: settings.scanPaused,
+      running: worker.running,
+      batchMode: isOpenRouterBatchSettings(settings),
+      batchState: worker.batchState,
+      batchMessage: worker.batchMessage,
+      runTotal: worker.runTotal,
+      runCompleted: worker.runCompleted,
+      providerCompleted: worker.providerCompleted,
+    };
+  });
   app.post("/api/queue/pause", mutationGuard, async () => services.database.updateSettings({ scanPaused: true }));
   app.post("/api/queue/resume", mutationGuard, async () => { const settings = services.database.updateSettings({ scanPaused: false }); void services.worker.processQueue(); return settings; });
+  app.post("/api/queue/retry-failed", mutationGuard, async () => {
+    const retried = services.database.retryFailedMessages();
+    if (!services.database.getSettings().scanPaused) void services.worker.processQueue();
+    return { retried };
+  });
 
   app.setNotFoundHandler(async (request, reply) => request.url.startsWith("/api/") ? reply.code(404).send({ error: "Not found" }) : reply.sendFile("index.html"));
   app.setErrorHandler(async (failure, request, reply) => {
@@ -171,4 +201,10 @@ function validateSettings(patch: Partial<AppSettings>): void {
   if (patch.gmailLabelIds && (!Array.isArray(patch.gmailLabelIds) || patch.gmailLabelIds.some((id) => typeof id !== "string"))) throw new Error("Invalid Gmail labels");
   if (patch.interests && patch.interests.length > 5000) throw new Error("Interest profile is too long");
   if (patch.filterRules && patch.filterRules.length > 5000) throw new Error("Filter rules are too long");
+  if (patch.modelProvider && !isModelProvider(patch.modelProvider)) throw new Error("Invalid model provider");
+}
+
+/** Narrows a settings value to a known model provider. */
+function isModelProvider(value: string): value is ModelProviderId {
+  return value === "openai-codex" || value === "openrouter";
 }

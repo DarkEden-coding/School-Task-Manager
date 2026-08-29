@@ -23,7 +23,7 @@ test("approval is idempotent across repeated requests", async () => {
     isConnected: () => true,
     applyCandidate: async () => { writes += 1; return "event-id"; },
   } as unknown as GoogleService;
-  const openai = { isConnected: async () => true } as unknown as OpenAIService;
+  const openai = { isConnected: async () => true, isOpenRouterConnected: async () => false } as unknown as OpenAIService;
   const worker = { status: () => ({ running: false, lastError: null }) } as unknown as ScanWorker;
   const app = await createServer({ ...config, stateDir: directory }, { database, google, openai, worker });
   try {
