@@ -162,6 +162,7 @@ export class ScanWorker {
         if (result.error) this.database.finishMessage(result.emailId, result.error);
         else {
           for (const event of result.events) this.database.saveCandidate(event.draft, result.emailId, event.fingerprint, calendarId, event.changeKind, event.relatedCandidateId);
+          if (result.school.length) this.database.stageGmailSchoolImport(result.emailId, result.school);
           this.database.finishMessage(result.emailId);
           this.#lastError = null;
         }
@@ -200,9 +201,10 @@ export class ScanWorker {
         this.#runTotal = Math.max(this.#runTotal, this.#runCompleted + this.database.getQueueStatus().queued + this.database.getQueueStatus().processing);
         try {
           const email = await this.google.getMessage(message.gmailId);
-          const events = await this.openai.classifyEmail(email);
+          const classified = await this.openai.classifyEmail(email);
           const calendarId = this.database.getSettings().calendarId;
-          for (const event of events) this.database.saveCandidate(event.draft, message.gmailId, event.fingerprint, calendarId, event.changeKind, event.relatedCandidateId);
+          for (const event of classified.events) this.database.saveCandidate(event.draft, message.gmailId, event.fingerprint, calendarId, event.changeKind, event.relatedCandidateId);
+          if (classified.school.length) this.database.stageGmailSchoolImport(message.gmailId, classified.school);
           this.database.finishMessage(message.gmailId);
           this.#lastError = null;
         } catch (error) {

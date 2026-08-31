@@ -384,3 +384,24 @@ dialog.datetime-modal::backdrop { background: #0d0f11d8; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+/* School planning views: restrained, compact neumorphism */
+:root { --shadow: 3px 4px 12px #101214, -2px -2px 8px #25282d; --shadow-soft: 2px 3px 8px #101214; --inset: inset 1px 1px 3px #111316; --radius: 14px; }
+.content { padding: 26px 34px; }
+.card { padding: 18px; }
+.class-cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:14px; }
+.class-card { display:grid; gap:6px; } .class-card h2 { margin:0; font-size:17px; } .class-card p,.class-card small { margin:0; color:var(--muted); font-size:13px; }
+.text-button { width:max-content; padding:0; border:0; color:#79adff; background:transparent; font-weight:700; }
+.upcoming-group { margin:18px 0; } .upcoming-group h3 { margin:0 0 5px; font-size:13px; color:#aeb6c1; }
+.work-row { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 0; border-bottom:1px solid var(--border); } .work-row small { display:block; color:var(--muted); font-size:12px; }
+.term-list { display:flex; flex-wrap:wrap; gap:8px; } .term-list button { padding:7px 10px; border:1px solid var(--border); border-radius:8px; color:var(--muted); background:var(--surface-soft); } .term-list button.active { color:#fff; border-color:#4c91f5; }
+.assignment-month { display:grid; grid-template-columns:repeat(7,1fr); gap:5px; } .assignment-month>b { padding:4px; color:var(--muted); font-size:11px; text-align:center; } .day-cell { min-height:105px; padding:6px; border:1px solid var(--border); border-radius:8px; background:var(--surface-soft); } .day-cell.outside { opacity:.45; } .day-cell>span { color:var(--muted); font-size:12px; }
+.due-mark { display:block; width:100%; margin-top:4px; overflow:hidden; padding:3px 5px; border:0; border-left:3px solid var(--red); border-radius:3px; color:#ffdce1; background:#492a31; font-size:11px; text-align:left; text-overflow:ellipsis; white-space:nowrap; } .due-mark i { display:inline-block; width:8px; height:3px; margin:0 3px 2px 0; background:var(--red); }
+.assignment-week { display:grid; grid-template-columns:repeat(7,minmax(110px,1fr)); overflow:auto; gap:7px; } .assignment-week>div { min-height:220px; padding:8px; border:1px solid var(--border); border-radius:8px; } .assignment-week b { color:var(--muted); font-size:12px; }
+.import-item { margin:10px 0; padding:12px; border:1px solid var(--border); border-radius:10px; } .import-item textarea { width:100%; margin-top:8px; padding:8px; border:1px solid var(--border); border-radius:7px; color:var(--text); background:var(--surface-inset); }
+details summary { cursor:pointer; color:#cbd2dc; font-weight:700; }
+@media(max-width:850px){.content{padding:20px 16px 82px}.day-cell{min-height:78px}.assignment-month{min-width:630px}.card:has(.assignment-month){overflow:auto}.class-cards{grid-template-columns:1fr}.mobile-nav button{font-size:10px}}
+/* School calendar warning windows */
+.warning-segment { display:block; height:7px; margin-top:4px; border-radius:3px; background:#d94a58; box-shadow:0 0 0 1px #ff8993 inset; }
+.assignment-week .warning-segment { margin:8px 0 4px; }
+.detail-grid a { color:#8ab7ff; overflow-wrap:anywhere; }
+.import-noop { border-left:3px solid #5b6673; opacity:.8; }

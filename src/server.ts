@@ -11,18 +11,18 @@ import { assertApprovable } from "./event-validation.js";
 import type { GoogleService } from "./google.js";
 import type { OpenAIService } from "./openai.js";
 import { isOpenRouterBatchSettings } from "./openrouter.js";
-import type { AppSettings, EventDraft, ModelProviderId } from "./types.js";
+import type { AppSettings, EventDraft, ModelProviderId, SchoolAssignmentInput, SchoolClassInput, SchoolTermInput } from "./types.js";
 import type { ScanWorker } from "./worker.js";
 
 interface Services { database: AppDatabase; google: GoogleService; openai: OpenAIService; worker: ScanWorker; }
 
 /** Builds the localhost web server and its authenticated JSON API. */
 export async function createServer(config: RuntimeConfig, services: Services): Promise<FastifyInstance> {
-  const app = Fastify({ logger: true, bodyLimit: 1_000_000 });
+  const app = Fastify({ logger: true, bodyLimit: 45_000_000 });
   const auth = new AuthService(services.database, config.secureCookies);
   await app.register(cookie);
   await app.register(formbody);
-  await app.register(multipart, { limits: { fileSize: 100_000, files: 1 } });
+  await app.register(multipart, { limits: { fileSize: 5_000_000, files: 8, fields: 10, parts: 18 } });
   await app.register(staticFiles, { root: join(process.cwd(), "public"), wildcard: false });
 
   app.addHook("onSend", async (_request, reply) => {
@@ -70,6 +70,7 @@ export async function createServer(config: RuntimeConfig, services: Services): P
       scanRunning: worker.running,
       scanPaused: settings.scanPaused,
       lastError: worker.lastError,
+      school: services.database.getSchoolDashboard(),
     };
   });
 
@@ -115,6 +116,48 @@ export async function createServer(config: RuntimeConfig, services: Services): P
     const query = typeof (request.query as { q?: unknown }).q === "string" ? (request.query as { q: string }).q : "";
     return services.openai.openrouter.listModels(query);
   });
+
+  app.get("/api/school", sessionGuard, async () => services.database.getSchoolDashboard());
+  app.get("/api/school/dashboard", sessionGuard, async () => services.database.getSchoolDashboard());
+  app.get("/api/terms", sessionGuard, async () => services.database.listTerms());
+  app.post("/api/terms", mutationGuard, async (request) => services.database.createTerm(termInput(request.body)));
+  app.patch("/api/terms/:id", mutationGuard, async (request) => services.database.updateTerm(routeId(request.params), termPatch(request.body)));
+  app.delete("/api/terms/:id", mutationGuard, async (request) => { services.database.deleteTerm(routeId(request.params)); return { ok: true }; });
+  app.get("/api/classes", sessionGuard, async (request) => services.database.listClasses(optionalQueryId(request.query, "termId")));
+  app.post("/api/classes", mutationGuard, async (request) => services.database.createClass(classInput(request.body)));
+  app.patch("/api/classes/:id", mutationGuard, async (request) => services.database.updateClass(routeId(request.params), classPatch(request.body)));
+  app.delete("/api/classes/:id", mutationGuard, async (request) => { services.database.deleteClass(routeId(request.params)); return { ok: true }; });
+  app.get("/api/assignments", sessionGuard, async (request) => services.database.listAssignments(optionalQueryId(request.query, "classId")));
+  app.post("/api/assignments", mutationGuard, async (request) => services.database.createAssignment(assignmentInput(request.body)));
+  app.patch("/api/assignments/:id", mutationGuard, async (request) => services.database.updateAssignment(routeId(request.params), assignmentPatch(request.body)));
+  app.post("/api/assignments/:id/complete", mutationGuard, async (request) => services.database.completeAssignment(routeId(request.params)));
+  app.post("/api/assignments/:id/reopen", mutationGuard, async (request) => services.database.reopenAssignment(routeId(request.params)));
+  app.delete("/api/assignments/:id", mutationGuard, async (request) => { services.database.deleteAssignment(routeId(request.params)); return { ok: true }; });
+
+  app.post("/api/school/imports", mutationGuard, async (request) => {
+    let text = "", instructions = "";
+    const images: Array<{ data: string; mimeType: string }> = [];
+    const accepted = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+    for await (const part of request.parts()) {
+      if (part.type === "file") {
+        if (part.fieldname !== "images" || !accepted.has(part.mimetype)) throw new Error("Screenshots must be PNG, JPEG, WebP, or GIF files named images");
+        if (images.length >= 8) throw new Error("Upload at most 8 screenshots");
+        const buffer = await part.toBuffer();
+        if (part.file.truncated) throw new Error("Each screenshot must be smaller than 5 MB");
+        if (!hasImageSignature(buffer, part.mimetype)) throw new Error("A screenshot's file contents do not match its image type");
+        images.push({ data: buffer.toString("base64"), mimeType: part.mimetype });
+      } else if (part.fieldname === "text") text = String(part.value).slice(0, 100_000);
+      else if (part.fieldname === "instructions") instructions = String(part.value).slice(0, 5000);
+    }
+    if (!text.trim() && !images.length) throw new Error("Provide text or at least one screenshot");
+    const school = await services.openai.analyzeSchoolImport(text, instructions, images);
+    const method = images.length ? (text.trim() ? "text+images" : "images") : "text";
+    return services.database.stageSchoolImport(method, school);
+  });
+  app.get("/api/school/imports", sessionGuard, async () => services.database.listSchoolImports());
+  app.get("/api/school/imports/:id", sessionGuard, async (request) => { const value = services.database.getSchoolImport(routeId(request.params)); if (!value) throw new Error("Pending school import not found"); return value; });
+  app.post("/api/school/imports/:id/apply", mutationGuard, async (request) => services.database.applySchoolImport(routeId(request.params), importSelections(request.body)));
+  app.delete("/api/school/imports/:id", mutationGuard, async (request) => { services.database.discardSchoolImport(routeId(request.params)); return { ok: true }; });
 
   app.get("/api/candidates", sessionGuard, async (request) => {
     const status = (request.query as { status?: string }).status === "history" ? "history" : "pending";
@@ -190,8 +233,40 @@ function stringBody(body: unknown, key: string): string {
 /** Parses a positive integer route parameter. */
 function routeId(params: unknown): number {
   const id = Number((params as { id?: string }).id);
-  if (!Number.isInteger(id) || id < 1) throw new Error("Invalid candidate id");
+  if (!Number.isInteger(id) || id < 1) throw new Error("Invalid id");
   return id;
+}
+
+/** Validates a JSON object and rejects fields outside its public contract. */
+function schoolBody(body: unknown, fields: readonly string[]): Record<string, unknown> {
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("JSON object required");
+  const record = body as Record<string, unknown>;
+  if (Object.keys(record).some((key) => !fields.includes(key))) throw new Error("Unknown school data field");
+  return record;
+}
+function requiredString(record: Record<string, unknown>, key: string): string { if (typeof record[key] !== "string") throw new Error(`${key} is required`); return record[key]; }
+function optionalString(record: Record<string, unknown>, key: string): string | undefined { if (!(key in record)) return undefined; if (typeof record[key] !== "string") throw new Error(`${key} must be a string`); return record[key] as string; }
+function optionalId(record: Record<string, unknown>, key: string): number | undefined { if (!(key in record)) return undefined; const value = record[key]; if (!Number.isInteger(value) || (value as number) < 1) throw new Error(`${key} must be a positive integer`); return value as number; }
+function termInput(body: unknown): SchoolTermInput { const r = schoolBody(body, ["name", "start", "end", "status"]); const status = requiredString(r, "status"); if (status !== "active" && status !== "archived") throw new Error("Invalid term status"); return { name: requiredString(r, "name"), start: requiredString(r, "start"), end: requiredString(r, "end"), status }; }
+function termPatch(body: unknown): Partial<SchoolTermInput> { const r = schoolBody(body, ["name", "start", "end", "status"]); const result: Partial<SchoolTermInput> = {}; for (const key of ["name", "start", "end"] as const) { const value = optionalString(r, key); if (value !== undefined) result[key] = value; } if ("status" in r) { const status = requiredString(r, "status"); if (status !== "active" && status !== "archived") throw new Error("Invalid term status"); result.status = status; } return result; }
+function classInput(body: unknown): SchoolClassInput { const r = schoolBody(body, classFields); return { termId: requiredId(r, "termId"), name: requiredString(r, "name"), code: requiredString(r, "code"), instructor: requiredString(r, "instructor"), contact: requiredString(r, "contact"), schedule: requiredString(r, "schedule"), location: requiredString(r, "location"), officeHours: requiredString(r, "officeHours"), links: requiredString(r, "links"), syllabusNotes: requiredString(r, "syllabusNotes"), notes: requiredString(r, "notes") }; }
+const classFields = ["termId", "name", "code", "instructor", "contact", "schedule", "location", "officeHours", "links", "syllabusNotes", "notes"] as const;
+function classPatch(body: unknown): Partial<SchoolClassInput> { const r = schoolBody(body, classFields); return patchFields(r, classFields) as Partial<SchoolClassInput>; }
+const assignmentFields = ["classId", "title", "due", "type", "usefulLink", "notes", "warningMinutes"] as const;
+function assignmentInput(body: unknown): SchoolAssignmentInput { const r = schoolBody(body, assignmentFields); return { classId: requiredId(r, "classId"), title: requiredString(r, "title"), due: nullableString(r, "due", true) as string | null, type: requiredString(r, "type"), usefulLink: requiredString(r, "usefulLink"), notes: requiredString(r, "notes"), warningMinutes: nullableInteger(r, "warningMinutes", true) as number | null }; }
+function assignmentPatch(body: unknown): Partial<SchoolAssignmentInput> { const r = schoolBody(body, assignmentFields); return patchFields(r, assignmentFields) as Partial<SchoolAssignmentInput>; }
+function requiredId(record: Record<string, unknown>, key: string): number { return optionalId(record, key) ?? (() => { throw new Error(`${key} is required`); })(); }
+function nullableString(record: Record<string, unknown>, key: string, required = false): string | null | undefined { if (!(key in record)) { if (required) throw new Error(`${key} is required`); return undefined; } if (record[key] !== null && typeof record[key] !== "string") throw new Error(`${key} must be a string or null`); return record[key] as string | null; }
+function nullableInteger(record: Record<string, unknown>, key: string, required = false): number | null | undefined { if (!(key in record)) { if (required) throw new Error(`${key} is required`); return undefined; } if (record[key] !== null && !Number.isInteger(record[key])) throw new Error(`${key} must be an integer or null`); return record[key] as number | null; }
+function patchFields(record: Record<string, unknown>, fields: readonly string[]): Record<string, unknown> { const result: Record<string, unknown> = {}; for (const field of fields) { if (!(field in record)) continue; result[field] = field === "termId" || field === "classId" ? requiredId(record, field) : field === "due" ? nullableString(record, field) : field === "warningMinutes" ? nullableInteger(record, field) : optionalString(record, field); } return result; }
+function optionalQueryId(query: unknown, key: string): number | undefined { const value = (query as Record<string, unknown>)[key]; if (value === undefined) return undefined; const id = Number(value); if (!Number.isInteger(id) || id < 1) throw new Error(`Invalid ${key}`); return id; }
+
+/** Checks the fixed file signatures for accepted screenshot formats. */
+function hasImageSignature(buffer: Buffer, mimeType: string): boolean {
+  if (mimeType === "image/png") return buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  if (mimeType === "image/jpeg") return buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  if (mimeType === "image/gif") return buffer.subarray(0, 6).toString("ascii") === "GIF87a" || buffer.subarray(0, 6).toString("ascii") === "GIF89a";
+  return mimeType === "image/webp" && buffer.subarray(0, 4).toString("ascii") === "RIFF" && buffer.subarray(8, 12).toString("ascii") === "WEBP";
 }
 
 /** Validates consequential settings before persistence. */
@@ -201,7 +276,13 @@ function validateSettings(patch: Partial<AppSettings>): void {
   if (patch.gmailLabelIds && (!Array.isArray(patch.gmailLabelIds) || patch.gmailLabelIds.some((id) => typeof id !== "string"))) throw new Error("Invalid Gmail labels");
   if (patch.interests && patch.interests.length > 5000) throw new Error("Interest profile is too long");
   if (patch.filterRules && patch.filterRules.length > 5000) throw new Error("Filter rules are too long");
+  if (patch.schoolImportRules !== undefined && (typeof patch.schoolImportRules !== "string" || patch.schoolImportRules.length > 5000)) throw new Error("School import rules are too long");
   if (patch.modelProvider && !isModelProvider(patch.modelProvider)) throw new Error("Invalid model provider");
+}
+
+function importSelections(body: unknown): Array<{ id: number; payload?: Record<string, unknown> }> {
+  const items = (body as { items?: unknown })?.items; if (!Array.isArray(items) || items.length > 1000) throw new Error("items must be a bounded array");
+  return items.map((item) => { if (!item || typeof item !== "object" || !Number.isInteger((item as {id?:unknown}).id)) throw new Error("Invalid import item"); const payload = (item as {payload?:unknown}).payload; if (payload !== undefined && (!payload || typeof payload !== "object" || Array.isArray(payload))) throw new Error("Invalid import payload"); return { id: (item as {id:number}).id, ...(payload ? { payload: payload as Record<string, unknown> } : {}) }; });
 }
 
 /** Narrows a settings value to a known model provider. */

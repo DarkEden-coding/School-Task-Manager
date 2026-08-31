@@ -1,7 +1,7 @@
 import { getSupportedThinkingLevels, type Model, type ThinkingLevelMap } from "@earendil-works/pi-ai";
 import { OPENROUTER_MODELS } from "@earendil-works/pi-ai/providers/openrouter.models";
 import type { AppDatabase } from "./database.js";
-import { buildClassifyPrompt, CLASSIFY_SYSTEM_PROMPT, CLASSIFY_TOOL, classifiedEventsFromToolCall, type ApprovedEventRef, type ClassifiedEvent, type EmailForModel } from "./classify.js";
+import { buildClassifyPrompt, CLASSIFY_SYSTEM_PROMPT, CLASSIFY_TOOL, classifiedEmailFromToolCall, SCHOOL_IMPORT_SYSTEM_PROMPT, SCHOOL_IMPORT_TOOL, schoolItemsFromToolCall, type ApprovedEventRef, type ClassifiedEmail, type ClassifiedEvent, type EmailForModel } from "./classify.js";
 import type { AvailableModel, ModelProviderId, ReasoningLevel } from "./types.js";
 
 type CatalogModel = Model<"openai-completions">;
@@ -23,7 +23,7 @@ const BATCH_TIMEOUT_MS = 24 * 60 * 60_000;
 const PROVIDER_ID = "openrouter";
 
 interface OpenRouterChatBody {
-  messages: Array<{ role: "system" | "user"; content: string }>;
+  messages: Array<{ role: "system" | "user"; content: string | Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }> }>;
   tools: unknown[];
   tool_choice: { type: "function"; function: { name: string } };
   reasoning?: { effort: string };
@@ -61,6 +61,7 @@ export interface BatchProgress {
 export interface ClassifyEmailResult {
   emailId: string;
   events: ClassifiedEvent[];
+  school: ClassifiedEmail["school"];
   error?: string;
 }
 
@@ -117,16 +118,40 @@ export class OpenRouterService {
   }
 
   /** Extracts event candidates, using the Batch API whenever a `:batch` model is selected. */
-  public async classifyEmail(email: EmailForModel): Promise<ClassifiedEvent[]> {
+  public async classifyEmail(email: EmailForModel): Promise<ClassifiedEmail> {
     if (isOpenRouterBatchSettings(this.database.getSettings())) {
       const [result] = await this.classifyEmails([email]);
-      if (!result) return [];
+      if (!result) return { events: [], school: [] };
       if (result.error) throw new Error(result.error);
-      return result.events;
+      return { events: result.events, school: result.school };
     }
     const prepared = await this.prepareRequest(email);
     const completion = await this.completeSync(await this.apiKey(), prepared.modelId, prepared.body);
-    return classifiedEventsFromToolCall(toolCallFromCompletion(completion), this.database.getSettings().timezone, prepared.approved);
+    return classifiedEmailFromToolCall(toolCallFromCompletion(completion), this.database.getSettings().timezone, prepared.approved);
+  }
+
+  /** Performs a synchronous, dedicated school import, including data-URL images. */
+  public async analyzeSchoolImport(text: string, instructions: string, images: Array<{ data: string; mimeType: string }> = []): Promise<ClassifiedEmail["school"]> {
+    const settings = this.database.getSettings();
+    if (isOpenRouterBatchModel(settings.modelId)) throw new Error("Interactive school imports cannot use a batch model. Choose a non-batch vision-capable OpenRouter model in Settings.");
+    const model = await this.findCatalogModel(settings.modelId);
+    const existing = this.database.getSchoolDashboard();
+    const prompt = `Current date/time: ${new Date().toISOString()}\nTimezone: ${settings.timezone}\nSaved school import rules: ${settings.schoolImportRules}\nOne-off instructions: ${instructions}\nExisting terms and classes (reuse numeric IDs when matching): ${JSON.stringify({ terms: existing.terms, classes: existing.classes })}\n\nUntrusted import text:\n${text}`;
+    const content: Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }> = [{ type: "text", text: prompt }, ...images.map((image) => ({ type: "image_url" as const, image_url: { url: `data:${image.mimeType};base64,${image.data}` } }))];
+    const body: OpenRouterChatBody = {
+      messages: [{ role: "system", content: SCHOOL_IMPORT_SYSTEM_PROMPT }, { role: "user", content }],
+      tools: [{ type: "function", function: { name: SCHOOL_IMPORT_TOOL.name, description: SCHOOL_IMPORT_TOOL.description, parameters: JSON.parse(JSON.stringify(SCHOOL_IMPORT_TOOL.parameters)), strict: true } }],
+      tool_choice: { type: "function", function: { name: SCHOOL_IMPORT_TOOL.name } },
+    };
+    const reasoning = reasoningEffort(model.reasoning, settings.reasoningLevel, model.thinkingLevelMap); if (reasoning) body.reasoning = reasoning;
+    try {
+      const completion = await this.completeSync(await this.apiKey(), model.id, body);
+      return schoolItemsFromToolCall(toolCallFromCompletion(completion));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (images.length && /image|vision|multimodal|content type|unsupported/i.test(message)) throw new Error(`The selected OpenRouter model/provider rejected image input. Choose a vision-capable model or import text instead. Provider message: ${message}`);
+      throw error;
+    }
   }
 
   /** Classifies every email in one OpenRouter Batch API submission. */
@@ -140,7 +165,7 @@ export class OpenRouterService {
       .slice(0, 100)
       .map((item) => ({ id: item.id, title: item.title, start: item.start, location: item.location }));
     const reasoning = reasoningEffort(catalogModel.reasoning, settings.reasoningLevel, catalogModel.thinkingLevelMap);
-    const prepared = emails.map((email) => ({ email, body: this.chatBody(buildClassifyPrompt(email, settings.timezone, settings.interests, settings.filterRules, approved), reasoning) }));
+    const prepared = emails.map((email) => ({ email, body: this.chatBody(buildClassifyPrompt(email, settings.timezone, settings.interests, settings.filterRules, settings.schoolImportRules, approved), reasoning) }));
     const model = openRouterInferenceModelId(catalogModel.id);
     const requests = prepared.map((item) => ({ custom_id: item.email.id, body: item.body }));
     const created = await this.request<OpenRouterBatch>(apiKey, "/api/beta/batches", {
@@ -154,16 +179,16 @@ export class OpenRouterService {
     const timezone = this.database.getSettings().timezone;
     return prepared.map((item) => {
       const result = byId.get(item.email.id);
-      if (!result) return { emailId: item.email.id, events: [], error: "OpenRouter batch result was missing" };
-      if (result.error) return { emailId: item.email.id, events: [], error: batchErrorMessage(result.error) };
+      if (!result) return { emailId: item.email.id, events: [], school: [], error: "OpenRouter batch result was missing" };
+      if (result.error) return { emailId: item.email.id, events: [], school: [], error: batchErrorMessage(result.error) };
       const status = result.response?.status_code ?? 0;
-      if (status >= 400) return { emailId: item.email.id, events: [], error: `OpenRouter batch request failed (${status})` };
+      if (status >= 400) return { emailId: item.email.id, events: [], school: [], error: `OpenRouter batch request failed (${status})` };
       const completion = result.response?.body ?? {};
-      if (completion.error?.message) return { emailId: item.email.id, events: [], error: completion.error.message };
+      if (completion.error?.message) return { emailId: item.email.id, events: [], school: [], error: completion.error.message };
       try {
-        return { emailId: item.email.id, events: classifiedEventsFromToolCall(toolCallFromCompletion(completion), timezone, approved) };
+        const classified = classifiedEmailFromToolCall(toolCallFromCompletion(completion), timezone, approved); return { emailId: item.email.id, ...classified };
       } catch (error) {
-        return { emailId: item.email.id, events: [], error: error instanceof Error ? error.message : String(error) };
+        return { emailId: item.email.id, events: [], school: [], error: error instanceof Error ? error.message : String(error) };
       }
     });
   }
@@ -185,7 +210,7 @@ export class OpenRouterService {
       .filter((item) => item.status === "approved" && (!item.end || Date.parse(item.end) > Date.now()))
       .slice(0, 100)
       .map((item) => ({ id: item.id, title: item.title, start: item.start, location: item.location }));
-    const body = this.chatBody(buildClassifyPrompt(email, settings.timezone, settings.interests, settings.filterRules, approved), reasoningEffort(model.reasoning, settings.reasoningLevel, model.thinkingLevelMap));
+    const body = this.chatBody(buildClassifyPrompt(email, settings.timezone, settings.interests, settings.filterRules, settings.schoolImportRules, approved), reasoningEffort(model.reasoning, settings.reasoningLevel, model.thinkingLevelMap));
     return { modelId: model.id, body, approved };
   }
 
@@ -278,7 +303,7 @@ export class OpenRouterService {
       headers.set("Accept", "application/json");
       headers.set("Authorization", `Bearer ${apiKey}`);
       headers.set("HTTP-Referer", "http://127.0.0.1");
-      headers.set("X-OpenRouter-Title", "Signal Mail");
+      headers.set("X-OpenRouter-Title", "School Manager");
       if (init.body) headers.set("Content-Type", "application/json");
       response = await fetch(`${OPENROUTER_ORIGIN}${path}`, { ...init, headers });
     } catch (error) {

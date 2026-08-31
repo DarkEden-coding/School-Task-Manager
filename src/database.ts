@@ -1,7 +1,8 @@
 import { DatabaseSync } from "node:sqlite";
 import type { Credential, CredentialInfo, CredentialStore } from "@earendil-works/pi-ai";
 import { SCHEMA } from "./schema.js";
-import type { AppSettings, CandidateStatus, EventCandidate, EventDraft, MessageStatus, QueueStatus, ReasoningLevel } from "./types.js";
+import type { AppSettings, CandidateStatus, EventCandidate, EventDraft, ExtractedSchoolItem, MessageStatus, QueueStatus, ReasoningLevel, SchoolAssignment, SchoolAssignmentInput, SchoolClass, SchoolClassInput, SchoolDashboard, SchoolImportLog, SchoolImportProposal, SchoolTerm, SchoolTermInput } from "./types.js";
+import { matchSchoolItems, resolveImportedClass, resolveImportedTerm } from "./school-import.js";
 import { CryptoStore } from "./crypto-store.js";
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -14,6 +15,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   reasoningLevel: "medium",
   interests: "Engineering, robotics, hiking, and outdoor activities",
   filterRules: "Prefer catching plausible opportunities over missing them. Exclude vague promotions without a real event.",
+  schoolImportRules: "",
   scanPaused: false,
 };
 
@@ -204,6 +206,201 @@ export class AppDatabase implements CredentialStore {
     this.db.prepare("UPDATE candidates SET status=?, calendar_event_id=COALESCE(?,calendar_event_id), updated_at=CURRENT_TIMESTAMP WHERE id=?").run(status, calendarEventId ?? null, id);
   }
 
+  /** Creates an academic term after validating its date range. */
+  public createTerm(input: SchoolTermInput): SchoolTerm {
+    validateTerm(input);
+    if (input.status === "active") this.db.prepare("UPDATE school_terms SET status='archived',updated_at=CURRENT_TIMESTAMP WHERE status='active'").run();
+    const result = this.db.prepare("INSERT INTO school_terms(name,start,end,status) VALUES(?,?,?,?)").run(input.name.trim(), input.start, input.end, input.status);
+    return this.requireTerm(Number(result.lastInsertRowid));
+  }
+
+  /** Lists terms with active terms first and newest terms first within each state. */
+  public listTerms(): SchoolTerm[] {
+    return (this.db.prepare("SELECT * FROM school_terms ORDER BY status='active' DESC, start DESC, id DESC").all() as Record<string, unknown>[]).map(rowToTerm);
+  }
+
+  /** Reads one academic term. */
+  public getTerm(id: number): SchoolTerm | undefined {
+    const row = this.db.prepare("SELECT * FROM school_terms WHERE id=?").get(id) as Record<string, unknown> | undefined;
+    return row ? rowToTerm(row) : undefined;
+  }
+
+  /** Updates a term and returns the persisted value. */
+  public updateTerm(id: number, patch: Partial<SchoolTermInput>): SchoolTerm {
+    const current = this.requireTerm(id);
+    const next = { ...current, ...patch };
+    validateTerm(next);
+    if (next.status === "active") this.db.prepare("UPDATE school_terms SET status='archived',updated_at=CURRENT_TIMESTAMP WHERE status='active' AND id!=?").run(id);
+    this.db.prepare("UPDATE school_terms SET name=?,start=?,end=?,status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(next.name.trim(), next.start, next.end, next.status, id);
+    return this.requireTerm(id);
+  }
+
+  /** Deletes a term and its dependent classes and assignments. */
+  public deleteTerm(id: number): void { this.requireTerm(id); this.db.prepare("DELETE FROM school_terms WHERE id=?").run(id); }
+
+  /** Creates a class in an existing term. */
+  public createClass(input: SchoolClassInput): SchoolClass {
+    validateClass(input); this.requireTerm(input.termId);
+    const result = this.db.prepare("INSERT INTO school_classes(term_id,name,code,instructor,contact,schedule,location,office_hours,links,syllabus_notes,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
+      .run(input.termId, input.name.trim(), input.code, input.instructor, input.contact, input.schedule, input.location, input.officeHours, input.links, input.syllabusNotes, input.notes);
+    return this.requireClass(Number(result.lastInsertRowid));
+  }
+
+  /** Lists classes, optionally restricted to one term, in deterministic name order. */
+  public listClasses(termId?: number): SchoolClass[] {
+    const query = termId === undefined ? "SELECT * FROM school_classes ORDER BY term_id, name COLLATE NOCASE, id" : "SELECT * FROM school_classes WHERE term_id=? ORDER BY name COLLATE NOCASE, id";
+    return (this.db.prepare(query).all(...(termId === undefined ? [] : [termId])) as Record<string, unknown>[]).map(rowToClass);
+  }
+
+  /** Reads one class. */
+  public getClass(id: number): SchoolClass | undefined { const row = this.db.prepare("SELECT * FROM school_classes WHERE id=?").get(id) as Record<string, unknown> | undefined; return row ? rowToClass(row) : undefined; }
+
+  /** Updates a class and returns the persisted value. */
+  public updateClass(id: number, patch: Partial<SchoolClassInput>): SchoolClass {
+    const next = { ...this.requireClass(id), ...patch }; validateClass(next); this.requireTerm(next.termId);
+    this.db.prepare("UPDATE school_classes SET term_id=?,name=?,code=?,instructor=?,contact=?,schedule=?,location=?,office_hours=?,links=?,syllabus_notes=?,notes=?,updated_at=CURRENT_TIMESTAMP WHERE id=?")
+      .run(next.termId, next.name.trim(), next.code, next.instructor, next.contact, next.schedule, next.location, next.officeHours, next.links, next.syllabusNotes, next.notes, id);
+    return this.requireClass(id);
+  }
+
+  /** Deletes a class and its dependent assignments. */
+  public deleteClass(id: number): void { this.requireClass(id); this.db.prepare("DELETE FROM school_classes WHERE id=?").run(id); }
+
+  /** Creates an open assignment in an existing class. */
+  public createAssignment(input: SchoolAssignmentInput): SchoolAssignment {
+    validateAssignment(input); this.requireClass(input.classId);
+    const result = this.db.prepare("INSERT INTO school_assignments(class_id,title,due,type,useful_link,notes,warning_minutes) VALUES(?,?,?,?,?,?,?)")
+      .run(input.classId, input.title.trim(), input.due, input.type, input.usefulLink, input.notes, input.warningMinutes);
+    return this.requireAssignment(Number(result.lastInsertRowid));
+  }
+
+  /** Lists assignments, optionally restricted to one class, with open due work first. */
+  public listAssignments(classId?: number): SchoolAssignment[] {
+    const query = classId === undefined ? "SELECT * FROM school_assignments ORDER BY status='open' DESC, due IS NULL, due, id" : "SELECT * FROM school_assignments WHERE class_id=? ORDER BY status='open' DESC, due IS NULL, due, id";
+    return (this.db.prepare(query).all(...(classId === undefined ? [] : [classId])) as Record<string, unknown>[]).map(rowToAssignment);
+  }
+
+  /** Reads one assignment. */
+  public getAssignment(id: number): SchoolAssignment | undefined { const row = this.db.prepare("SELECT * FROM school_assignments WHERE id=?").get(id) as Record<string, unknown> | undefined; return row ? rowToAssignment(row) : undefined; }
+
+  /** Updates assignment details without changing its durable completion state. */
+  public updateAssignment(id: number, patch: Partial<SchoolAssignmentInput>): SchoolAssignment {
+    const next = { ...this.requireAssignment(id), ...patch }; validateAssignment(next); this.requireClass(next.classId);
+    this.db.prepare("UPDATE school_assignments SET class_id=?,title=?,due=?,type=?,useful_link=?,notes=?,warning_minutes=?,updated_at=CURRENT_TIMESTAMP WHERE id=?")
+      .run(next.classId, next.title.trim(), next.due, next.type, next.usefulLink, next.notes, next.warningMinutes, id);
+    return this.requireAssignment(id);
+  }
+
+  /** Marks an assignment done; imports and general edits cannot reopen it. */
+  public completeAssignment(id: number): SchoolAssignment {
+    this.requireAssignment(id);
+    this.db.prepare("UPDATE school_assignments SET status='done', completed_at=COALESCE(completed_at,CURRENT_TIMESTAMP), updated_at=CURRENT_TIMESTAMP WHERE id=?").run(id);
+    return this.requireAssignment(id);
+  }
+
+  /** Explicitly reopens completed work; imports cannot call this transition implicitly. */
+  public reopenAssignment(id: number): SchoolAssignment { this.requireAssignment(id); this.db.prepare("UPDATE school_assignments SET status='open',completed_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(id); return this.requireAssignment(id); }
+
+  /** Deletes an assignment. */
+  public deleteAssignment(id: number): void { this.requireAssignment(id); this.db.prepare("DELETE FROM school_assignments WHERE id=?").run(id); }
+
+  /** Stages manual model output without retaining source text, images, URLs, or evidence. */
+  public stageSchoolImport(inputMethod: SchoolImportProposal["inputMethod"], extracted: ExtractedSchoolItem[]): SchoolImportProposal {
+    return this.insertSchoolImport(inputMethod, extracted);
+  }
+
+  /** Stages Gmail model output once even if queue processing retries the message. */
+  public stageGmailSchoolImport(gmailId: string, extracted: ExtractedSchoolItem[]): void {
+    const sourceKey = `gmail:${gmailId}`;
+    if (this.db.prepare("SELECT 1 FROM school_imports WHERE source_key=?").get(sourceKey)) return;
+    this.insertSchoolImport("gmail", extracted, sourceKey);
+  }
+
+  /** Atomically stores temporary proposal details and a metadata-only log header. */
+  private insertSchoolImport(inputMethod: SchoolImportProposal["inputMethod"], extracted: ExtractedSchoolItem[], sourceKey?: string): SchoolImportProposal {
+    if (!extracted.length) throw new Error("No school records were found in this import");
+    if (extracted.length > 1000) throw new Error("Too many imported school records");
+    const matched = matchSchoolItems(this, extracted);
+    this.db.exec("BEGIN");
+    try {
+      const result = this.db.prepare("INSERT INTO school_imports(status,input_method,source_key,item_count) VALUES('pending',?,?,?)").run(inputMethod, sourceKey ?? null, matched.length);
+      const id = Number(result.lastInsertRowid);
+      const insert = this.db.prepare("INSERT INTO school_import_items(import_id,kind,action,target_id,needs_review,payload,conflicts) VALUES(?,?,?,?,?,?,?)");
+      for (const item of matched) insert.run(id, item.kind, item.action, item.targetId, item.needsReview ? 1 : 0, JSON.stringify(item.payload), JSON.stringify(item.conflicts));
+      this.db.exec("COMMIT");
+      return this.getSchoolImport(id)!;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /** Reads a pending proposal; temporary details are unavailable after apply/discard. */
+  public getSchoolImport(id: number): SchoolImportProposal | undefined {
+    const head = this.db.prepare("SELECT * FROM school_imports WHERE id=? AND status='pending'").get(id) as Record<string, unknown> | undefined; if (!head) return undefined;
+    const rows = this.db.prepare("SELECT * FROM school_import_items WHERE import_id=? ORDER BY id").all(id) as Record<string, unknown>[];
+    return { id, status: "pending", inputMethod: head.input_method as SchoolImportProposal["inputMethod"], createdAt: String(head.created_at), items: rows.map((r) => ({ id: Number(r.id), kind: r.kind as never, action: r.action as never, targetId: r.target_id === null ? null : Number(r.target_id), needsReview: Boolean(r.needs_review), payload: JSON.parse(String(r.payload)) as Record<string, unknown>, conflicts: JSON.parse(String(r.conflicts)) as string[] })) };
+  }
+
+  /** Lists metadata-only import logs. */
+  public listSchoolImports(): SchoolImportLog[] { return (this.db.prepare("SELECT * FROM school_imports ORDER BY id DESC").all() as Record<string, unknown>[]).map((r) => ({ id:Number(r.id),status:r.status as SchoolImportLog["status"],inputMethod:String(r.input_method),createdAt:String(r.created_at),itemCount:Number(r.item_count),successCount:Number(r.success_count),failureCount:Number(r.failure_count) })); }
+
+  /** Applies selected items atomically, then destroys all temporary proposal details. */
+  public applySchoolImport(id: number, selected: Array<{ id: number; payload?: Record<string, unknown> }>): SchoolImportLog {
+    const proposal = this.getSchoolImport(id);
+    if (!proposal) throw new Error("Pending school import not found");
+    const chosen = new Map(selected.map((item) => [item.id, item]));
+    const rank = { term: 0, class: 1, assignment: 2 } as const;
+    const items = proposal.items.filter((item) => chosen.has(item.id) && item.action !== "noop")
+      .sort((left, right) => left.action === "delete" || right.action === "delete" ? rank[right.kind] - rank[left.kind] : rank[left.kind] - rank[right.kind]);
+    this.db.exec("BEGIN");
+    try {
+      for (const item of items) {
+        const payload = { ...item.payload, ...(chosen.get(item.id)?.payload ?? {}) };
+        if (item.kind === "assignment") {
+          delete payload.status;
+          delete payload.completedAt;
+        }
+        if (item.action === "delete") {
+          if (!item.targetId) throw new Error(`Cannot delete unmatched ${item.kind}`);
+          if (item.kind === "term") this.deleteTerm(item.targetId);
+          else if (item.kind === "class") this.deleteClass(item.targetId);
+          else this.deleteAssignment(item.targetId);
+        } else if (item.kind === "term") {
+          const input = termImportInput(payload);
+          if (item.action === "create") this.createTerm(input); else this.updateTerm(item.targetId!, input);
+        } else if (item.kind === "class") {
+          const term = resolveImportedTerm(this, payload);
+          if (!term) throw new Error(`Choose or import a term for ${String(payload.name || "this class")}`);
+          const input = classImportInput(payload, term.id);
+          if (item.action === "create") this.createClass(input); else this.updateClass(item.targetId!, input);
+        } else {
+          const schoolClass = resolveImportedClass(this, payload);
+          if (!schoolClass) throw new Error(`Choose or import a class for ${String(payload.title || "this assignment")}`);
+          const input = assignmentImportInput(payload, schoolClass.id);
+          if (item.action === "create") this.createAssignment(input); else this.updateAssignment(item.targetId!, input);
+        }
+      }
+      this.db.prepare("DELETE FROM school_import_items WHERE import_id=?").run(id);
+      this.db.prepare("UPDATE school_imports SET status='applied',success_count=?,failure_count=0 WHERE id=?").run(items.length, id);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return this.listSchoolImports().find((item) => item.id === id)!;
+  }
+
+  /** Discards a pending proposal and its temporary details. */
+  public discardSchoolImport(id: number): void { if (!this.getSchoolImport(id)) throw new Error("Pending school import not found"); this.db.prepare("DELETE FROM school_import_items WHERE import_id=?").run(id); this.db.prepare("UPDATE school_imports SET status='discarded' WHERE id=?").run(id); }
+
+  /** Returns all school data for a dashboard in deterministic display order. */
+  public getSchoolDashboard(): SchoolDashboard { return { terms: this.listTerms(), classes: this.listClasses(), assignments: this.listAssignments() }; }
+
+  private requireTerm(id: number): SchoolTerm { const term = this.getTerm(id); if (!term) throw new Error("Term not found"); return term; }
+  private requireClass(id: number): SchoolClass { const schoolClass = this.getClass(id); if (!schoolClass) throw new Error("Class not found"); return schoolClass; }
+  private requireAssignment(id: number): SchoolAssignment { const assignment = this.getAssignment(id); if (!assignment) throw new Error("Assignment not found"); return assignment; }
+
   /** Stores a scalar operational marker. */
   public setMarker(key: string, value: string): void { this.db.prepare("INSERT INTO app_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(`marker:${key}`, JSON.stringify(value)); }
 
@@ -214,7 +411,70 @@ export class AppDatabase implements CredentialStore {
   }
 }
 
-/** Converts a database candidate row to the public contract. */
+/** Reads one required import string without accepting coerced values. */
+function importString(payload: Record<string, unknown>, key: string): string {
+  const value = payload[key];
+  if (typeof value !== "string") throw new Error(`${key} must be a string`);
+  return value;
+}
+
+/** Narrows an imported term to the production input contract. */
+function termImportInput(payload: Record<string, unknown>): SchoolTermInput {
+  const status = payload.status;
+  if (status !== "active" && status !== "archived") throw new Error("Invalid term status");
+  return { name: importString(payload, "name"), start: importString(payload, "start"), end: importString(payload, "end"), status };
+}
+
+/** Narrows an imported class and supplies its resolved term. */
+function classImportInput(payload: Record<string, unknown>, termId: number): SchoolClassInput {
+  return {
+    termId,
+    name: importString(payload, "name"),
+    code: importString(payload, "code"),
+    instructor: importString(payload, "instructor"),
+    contact: importString(payload, "contact"),
+    schedule: importString(payload, "schedule"),
+    location: importString(payload, "location"),
+    officeHours: importString(payload, "officeHours"),
+    links: importString(payload, "links"),
+    syllabusNotes: importString(payload, "syllabusNotes"),
+    notes: importString(payload, "notes"),
+  };
+}
+
+/** Narrows an imported assignment and supplies its resolved class. */
+function assignmentImportInput(payload: Record<string, unknown>, classId: number): SchoolAssignmentInput {
+  const due = payload.due;
+  const warningMinutes = payload.warningMinutes;
+  if (due !== null && typeof due !== "string") throw new Error("due must be a string or null");
+  if (warningMinutes !== null && !Number.isInteger(warningMinutes)) throw new Error("warningMinutes must be an integer or null");
+  return {
+    classId,
+    title: importString(payload, "title"),
+    due,
+    type: importString(payload, "type"),
+    usefulLink: importString(payload, "usefulLink"),
+    notes: importString(payload, "notes"),
+    warningMinutes: warningMinutes as number | null,
+  };
+}
+
+function validateTerm(input: SchoolTermInput): void {
+  if (!input.name.trim()) throw new Error("Term name is required");
+  if (!isIsoDate(input.start) || !isIsoDate(input.end) || Date.parse(input.end) < Date.parse(input.start)) throw new Error("Term dates are invalid");
+  if (input.status !== "active" && input.status !== "archived") throw new Error("Invalid term status");
+}
+function validateClass(input: SchoolClassInput): void { if (!Number.isInteger(input.termId) || input.termId < 1 || !input.name.trim()) throw new Error("Class term and name are required"); }
+function validateAssignment(input: SchoolAssignmentInput): void {
+  if (!Number.isInteger(input.classId) || input.classId < 1 || !input.title.trim()) throw new Error("Assignment class and title are required");
+  if (input.due !== null && !isIsoDate(input.due)) throw new Error("Assignment due date must be ISO formatted");
+  if (input.warningMinutes !== null && (!Number.isInteger(input.warningMinutes) || input.warningMinutes < 0)) throw new Error("Warning duration must be a non-negative integer");
+}
+function isIsoDate(value: string): boolean { return /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2}))?$/.test(value) && !Number.isNaN(Date.parse(value)); }
+function rowToTerm(row: Record<string, unknown>): SchoolTerm { return { id: Number(row.id), name: String(row.name), start: String(row.start), end: String(row.end), status: row.status as SchoolTerm["status"], createdAt: String(row.created_at), updatedAt: String(row.updated_at) }; }
+function rowToClass(row: Record<string, unknown>): SchoolClass { return { id: Number(row.id), termId: Number(row.term_id), name: String(row.name), code: String(row.code), instructor: String(row.instructor), contact: String(row.contact), schedule: String(row.schedule), location: String(row.location), officeHours: String(row.office_hours), links: String(row.links), syllabusNotes: String(row.syllabus_notes), notes: String(row.notes), createdAt: String(row.created_at), updatedAt: String(row.updated_at) }; }
+function rowToAssignment(row: Record<string, unknown>): SchoolAssignment { return { id: Number(row.id), classId: Number(row.class_id), title: String(row.title), due: row.due ? String(row.due) : null, type: String(row.type), usefulLink: String(row.useful_link), notes: String(row.notes), warningMinutes: row.warning_minutes === null ? null : Number(row.warning_minutes), status: row.status as SchoolAssignment["status"], completedAt: row.completed_at ? String(row.completed_at) : null, createdAt: String(row.created_at), updatedAt: String(row.updated_at) }; }
+
 function rowToCandidate(row: Record<string, unknown>): EventCandidate {
   return {
     id: Number(row.id), status: row.status as CandidateStatus, changeKind: row.change_kind as EventCandidate["changeKind"],

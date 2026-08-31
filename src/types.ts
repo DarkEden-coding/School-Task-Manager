@@ -13,6 +13,71 @@ export type ReasoningLevel = "off" | "minimal" | "low" | "medium" | "high" | "xh
 /** Model backends that can classify email. */
 export type ModelProviderId = "openai-codex" | "openrouter";
 
+/** Lifecycle state for an academic term. */
+export type TermStatus = "active" | "archived";
+
+/** Durable completion state for a class assignment. */
+export type AssignmentStatus = "open" | "done";
+
+/** An academic term used to organize classes. */
+export interface SchoolTerm {
+  id: number;
+  name: string;
+  start: string;
+  end: string;
+  status: TermStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A class attached to an academic term. */
+export interface SchoolClass {
+  id: number;
+  termId: number;
+  name: string;
+  code: string;
+  instructor: string;
+  contact: string;
+  schedule: string;
+  location: string;
+  officeHours: string;
+  links: string;
+  syllabusNotes: string;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A tracked assignment attached to one class. */
+export interface SchoolAssignment {
+  id: number;
+  classId: number;
+  title: string;
+  due: string | null;
+  type: string;
+  usefulLink: string;
+  notes: string;
+  warningMinutes: number | null;
+  status: AssignmentStatus;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** School records needed to render the dashboard. */
+export interface SchoolDashboard {
+  terms: SchoolTerm[];
+  classes: SchoolClass[];
+  assignments: SchoolAssignment[];
+}
+
+/** Fields accepted when creating or editing a term. */
+export interface SchoolTermInput { name: string; start: string; end: string; status: TermStatus; }
+/** Fields accepted when creating or editing a class. */
+export interface SchoolClassInput { termId: number; name: string; code: string; instructor: string; contact: string; schedule: string; location: string; officeHours: string; links: string; syllabusNotes: string; notes: string; }
+/** Editable assignment fields; status is deliberately excluded. */
+export interface SchoolAssignmentInput { classId: number; title: string; due: string | null; type: string; usefulLink: string; notes: string; warningMinutes: number | null; }
+
 /** Editable event data produced by the model and reviewed by the user. */
 export interface EventDraft {
   title: string;
@@ -51,8 +116,21 @@ export interface AppSettings {
   reasoningLevel: ReasoningLevel;
   interests: string;
   filterRules: string;
+  schoolImportRules: string;
   scanPaused: boolean;
 }
+
+/** A model-extracted school record before it is matched to local IDs. */
+export interface ExtractedSchoolItem {
+  kind: "term" | "class" | "assignment";
+  operation: "createOrUpdate" | "delete";
+  payload: Record<string, unknown>;
+}
+
+export type SchoolImportKind = ExtractedSchoolItem["kind"];
+export interface SchoolImportItem { id: number; kind: SchoolImportKind; action: "create" | "update" | "delete" | "noop"; targetId: number | null; needsReview: boolean; payload: Record<string, unknown>; conflicts: string[]; }
+export interface SchoolImportProposal { id: number; status: "pending"; inputMethod: "text" | "images" | "text+images" | "gmail"; createdAt: string; items: SchoolImportItem[]; }
+export interface SchoolImportLog { id: number; status: "pending" | "applied" | "discarded" | "failed"; inputMethod: string; createdAt: string; itemCount: number; successCount: number; failureCount: number; }
 
 /** Public connection and processing state shown on the dashboard. */
 export interface DashboardStatus {

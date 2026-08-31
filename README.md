@@ -1,8 +1,9 @@
-# Email Event Manager
+# School Manager
 
-A single-user, local web application that reviews Gmail event mail and proposes
-Calendar changes. It is deliberately bound to loopback by default: review and
-approve proposals before anything is written to Calendar.
+A single-user, local web application for classes, assignments, and reviewed
+Gmail-to-Google Calendar changes. It tracks terms, class details, due work,
+warning periods, pasted text, and screenshot imports. The service stays bound
+to loopback by default, and consequential model-proposed changes require review.
 
 ## Linux quick start
 

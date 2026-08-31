@@ -42,5 +42,12 @@ test("approval is idempotent across repeated requests", async () => {
     assert.equal(first.statusCode, 200);
     assert.equal(second.statusCode, 200);
     assert.equal(writes, 1);
+
+    const termPayload = { name: "Fall 2027", start: "2027-08-01", end: "2027-12-20", status: "active" };
+    assert.equal((await app.inject({ method: "POST", url: "/api/terms", headers: cookieHeader, payload: termPayload })).statusCode, 403);
+    const term = await app.inject({ method: "POST", url: "/api/terms", headers, payload: termPayload });
+    assert.equal(term.statusCode, 200);
+    assert.equal(term.json().name, "Fall 2027");
+    assert.equal((await app.inject({ method: "GET", url: "/api/school/dashboard", headers: cookieHeader })).json().terms.length, 1);
   } finally { await app.close(); database.close(); rmSync(directory, { recursive: true, force: true }); }
 });

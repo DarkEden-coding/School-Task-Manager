@@ -77,4 +77,71 @@ CREATE TABLE IF NOT EXISTS scan_runs (
   completed_at TEXT,
   error TEXT
 );
+
+CREATE TABLE IF NOT EXISTS school_terms (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+  start TEXT NOT NULL,
+  end TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS school_terms_status_idx ON school_terms(status, start DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS school_classes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  term_id INTEGER NOT NULL REFERENCES school_terms(id) ON DELETE CASCADE,
+  name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+  code TEXT NOT NULL DEFAULT '',
+  instructor TEXT NOT NULL DEFAULT '',
+  contact TEXT NOT NULL DEFAULT '',
+  schedule TEXT NOT NULL DEFAULT '',
+  location TEXT NOT NULL DEFAULT '',
+  office_hours TEXT NOT NULL DEFAULT '',
+  links TEXT NOT NULL DEFAULT '',
+  syllabus_notes TEXT NOT NULL DEFAULT '',
+  notes TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS school_classes_term_idx ON school_classes(term_id, name, id);
+
+CREATE TABLE IF NOT EXISTS school_assignments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  class_id INTEGER NOT NULL REFERENCES school_classes(id) ON DELETE CASCADE,
+  title TEXT NOT NULL CHECK (length(trim(title)) > 0),
+  due TEXT,
+  type TEXT NOT NULL DEFAULT '',
+  useful_link TEXT NOT NULL DEFAULT '',
+  notes TEXT NOT NULL DEFAULT '',
+  warning_minutes INTEGER CHECK (warning_minutes IS NULL OR warning_minutes >= 0),
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done')),
+  completed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS school_assignments_class_idx ON school_assignments(class_id, status, due, id);
+
+CREATE TABLE IF NOT EXISTS school_imports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  status TEXT NOT NULL CHECK(status IN ('pending','applied','discarded','failed')),
+  input_method TEXT NOT NULL,
+  source_key TEXT UNIQUE,
+  item_count INTEGER NOT NULL DEFAULT 0,
+  success_count INTEGER NOT NULL DEFAULT 0,
+  failure_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS school_import_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  import_id INTEGER NOT NULL REFERENCES school_imports(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK(kind IN ('term','class','assignment')),
+  action TEXT NOT NULL CHECK(action IN ('create','update','delete','noop')),
+  target_id INTEGER,
+  needs_review INTEGER NOT NULL,
+  payload TEXT NOT NULL,
+  conflicts TEXT NOT NULL DEFAULT '[]'
+);
+CREATE INDEX IF NOT EXISTS school_import_items_import_idx ON school_import_items(import_id,id);
 `;

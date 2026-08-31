@@ -3,16 +3,77 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { schoolItemsFromToolCall } from "../src/classify.js";
 import { AppDatabase } from "../src/database.js";
 import { readableEmailBody } from "../src/google.js";
 import { eventFingerprint, validateEventDraft } from "../src/event-validation.js";
 import { isOpenRouterBatchModel, OpenRouterService, openRouterInferenceModelId } from "../src/openrouter.js";
+
+test("dedicated school import tool rejects unsafe payload fields", () => {
+  const base = { type: "toolCall" as const, id: "1", name: "submit_school_import" };
+  assert.throws(() => schoolItemsFromToolCall({ ...base, arguments: { school: [{ kind: "term", operation: "createOrUpdate", payload: { name: "Fall", start: "2026-08-01", end: "2026-12-01", status: "active", unsafe: true } }] } }));
+  assert.deepEqual(schoolItemsFromToolCall({ ...base, arguments: { school: [{ kind: "assignment", operation: "createOrUpdate", payload: { classId: 7, className: "Biology", classCode: "BIO 101", termName: "Fall", title: "Lab", due: null, type: "lab", usefulLink: "", notes: "", warningMinutes: 60 } }] } }), [{ kind: "assignment", operation: "createOrUpdate", payload: { classId: 7, className: "Biology", classCode: "BIO 101", termName: "Fall", title: "Lab", due: null, type: "lab", usefulLink: "", notes: "", warningMinutes: 60 } }]);
+});
 
 function withDatabase(run: (database: AppDatabase) => void): void {
   const directory = mkdtempSync(join(tmpdir(), "email-manager-test-"));
   const database = new AppDatabase(join(directory, "test.sqlite"), directory);
   try { run(database); } finally { database.close(); rmSync(directory, { recursive: true, force: true }); }
 }
+
+test("school migration preserves existing data and CRUD keeps completion durable", () => withDatabase((database) => {
+  database.updateSettings({ calendarId: "existing-calendar" });
+  const term = database.createTerm({ name: "Spring 2027", start: "2027-01-01", end: "2027-05-01", status: "active" });
+  const schoolClass = database.createClass({ termId: term.id, name: "Algorithms", code: "CS 301", instructor: "Ada", contact: "ada@example.test", schedule: "MW", location: "Room 1", officeHours: "Friday", links: "", syllabusNotes: "", notes: "" });
+  const assignment = database.createAssignment({ classId: schoolClass.id, title: "Proof", due: "2027-02-01T12:00:00Z", type: "Homework", usefulLink: "", notes: "", warningMinutes: 30 });
+  assert.equal(database.getSettings().calendarId, "existing-calendar");
+  assert.equal(database.getSchoolDashboard().assignments[0]?.status, "open");
+  database.completeAssignment(assignment.id);
+  const edited = database.updateAssignment(assignment.id, { title: "Proof revised", due: null });
+  assert.equal(edited.status, "done");
+  assert.ok(edited.completedAt);
+  assert.deepEqual(database.listClasses(term.id).map((item) => item.id), [schoolClass.id]);
+  database.deleteTerm(term.id);
+  assert.equal(database.getAssignment(assignment.id), undefined);
+}));
+
+test("school import creates a related term, class, and assignment atomically", () => withDatabase((database) => {
+  const proposal = database.stageSchoolImport("text", [
+    { kind: "term", operation: "createOrUpdate", payload: { name: "Fall 2027", start: "2027-08-20", end: "2027-12-20", status: "active" } },
+    { kind: "class", operation: "createOrUpdate", payload: { termId: null, termName: "Fall 2027", name: "Biology", code: "BIO 101", instructor: "", contact: "", schedule: "", location: "", officeHours: "", links: "", syllabusNotes: "", notes: "" } },
+    { kind: "assignment", operation: "createOrUpdate", payload: { classId: null, className: "Biology", classCode: "BIO 101", termName: "Fall 2027", title: "Lab 1", due: "2027-09-01T17:00:00Z", type: "Lab", usefulLink: "", notes: "", warningMinutes: 1440 } },
+  ]);
+  database.applySchoolImport(proposal.id, proposal.items.map((item) => ({ id: item.id })));
+  assert.equal(database.listTerms()[0]?.name, "Fall 2027");
+  assert.equal(database.listClasses()[0]?.code, "BIO 101");
+  assert.equal(database.listAssignments()[0]?.title, "Lab 1");
+  assert.equal(database.getSchoolImport(proposal.id), undefined);
+}));
+
+test("school import flags due-date conflicts and preserves completion", () => withDatabase((database) => {
+  const term = database.createTerm({ name: "Spring", start: "2027-01-01", end: "2027-05-01", status: "active" });
+  const schoolClass = database.createClass({ termId: term.id, name: "Math", code: "MATH 1", instructor: "", contact: "", schedule: "", location: "", officeHours: "", links: "", syllabusNotes: "", notes: "" });
+  const assignment = database.createAssignment({ classId: schoolClass.id, title: "Quiz", due: "2027-02-01T12:00:00Z", type: "", usefulLink: "", notes: "", warningMinutes: null });
+  database.completeAssignment(assignment.id);
+  const proposal = database.stageSchoolImport("text", [{ kind: "assignment", operation: "createOrUpdate", payload: { classId: schoolClass.id, className: "Math", classCode: "MATH 1", termName: "Spring", title: "Quiz", due: "2027-02-02T12:00:00Z", type: "", usefulLink: "", notes: "", warningMinutes: null } }]);
+  assert.deepEqual(proposal.items[0]?.conflicts, ["due"]);
+  database.applySchoolImport(proposal.id, [{ id: proposal.items[0]!.id }]);
+  assert.equal(database.getAssignment(assignment.id)?.status, "done");
+  assert.equal(database.getAssignment(assignment.id)?.due, "2027-02-02T12:00:00Z");
+}));
+
+test("school import does not cross term boundaries and Gmail retries deduplicate", () => withDatabase((database) => {
+  const term = database.createTerm({ name: "Spring", start: "2027-01-01", end: "2027-05-01", status: "active" });
+  database.createClass({ termId: term.id, name: "Biology", code: "BIO 101", instructor: "", contact: "", schedule: "", location: "", officeHours: "", links: "", syllabusNotes: "", notes: "" });
+  const extracted = [{ kind: "class" as const, operation: "createOrUpdate" as const, payload: { termId: null, termName: "Unknown term", name: "Biology", code: "BIO 101", instructor: "", contact: "", schedule: "", location: "", officeHours: "", links: "", syllabusNotes: "", notes: "" } }];
+  const proposal = database.stageSchoolImport("text", extracted);
+  assert.equal(proposal.items[0]?.action, "create");
+  assert.equal(proposal.items[0]?.targetId, null);
+  database.stageGmailSchoolImport("message-1", extracted);
+  database.stageGmailSchoolImport("message-1", extracted);
+  assert.equal(database.listSchoolImports().filter((item) => item.inputMethod === "gmail").length, 1);
+  assert.throws(() => database.stageSchoolImport("text", []), /no school records/i);
+}));
 
 test("candidate validation rejects reversed dates", () => {
   assert.throws(() => validateEventDraft({ title: "Bad", start: "2027-01-02T12:00:00Z", end: "2027-01-02T11:00:00Z" }, "UTC"), /end must be after/i);
