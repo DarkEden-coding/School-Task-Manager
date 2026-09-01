@@ -438,6 +438,12 @@ details summary { cursor:pointer; color:#cbd2dc; font-weight:700; }
 .chat-message.tool[open] summary { margin-bottom:8px; }
 .chat-message.tool > div { max-height:45vh; overflow:auto; }
 .chat-message small { display:block; margin-bottom:4px; color:#8ab7ff; font:11px/1.3 ui-sans-serif,system-ui,sans-serif; text-transform:uppercase; }
+.chat-message p { margin:0 0 8px; }
+.chat-message p:last-child { margin-bottom:0; }
+.chat-message h1,.chat-message h2,.chat-message h3 { margin:12px 0 6px; line-height:1.25; }
+.chat-message h1:first-child,.chat-message h2:first-child,.chat-message h3:first-child { margin-top:0; }
+.chat-message ul { margin:7px 0; padding-left:22px; }
+.chat-message code { padding:2px 5px; border-radius:5px; background:var(--surface-inset); font:13px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace; }
 .chat-form { display:flex; align-items:flex-end; gap:10px; padding-top:14px; border-top:1px solid var(--border); }
 .chat-form textarea { flex:1; resize:vertical; padding:11px; border:1px solid var(--border-strong); border-radius:10px; color:var(--text); background:var(--surface-inset); }
 @media(max-width:850px){.agent-layout{grid-template-columns:1fr}.conversation-list{max-height:180px;overflow:auto}.chat-message{max-width:95%}}

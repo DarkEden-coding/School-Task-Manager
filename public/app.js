@@ -14,6 +14,26 @@
   let candidateSort = 'start';
 
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+  /** Renders the small, safe Markdown subset used in agent replies. */
+  const markdown = (value) => {
+    const code = [];
+    const inline = (text) => esc(text).replace(/`([^`]+)`/g, (_match, content) => { code.push(`<code>${content}</code>`); return `\u0000${code.length - 1}\u0000`; })
+      .replace(/\[([^\]]+)]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/\*([^*]+)\*/g, '<em>$1</em>')
+      .replace(/\u0000(\d+)\u0000/g, (_match, index) => code[Number(index)] || '');
+    const lines = String(value ?? '').split(/\r?\n/), output = [];
+    let inList = false;
+    for (const line of lines) {
+      const item = line.match(/^\s*[-*]\s+(.+)/);
+      if (item) { if (!inList) output.push('<ul>'); inList = true; output.push(`<li>${inline(item[1])}</li>`); continue; }
+      if (inList) { output.push('</ul>'); inList = false; }
+      const heading = line.match(/^(#{1,3})\s+(.+)/);
+      if (heading) output.push(`<h${heading[1].length}>${inline(heading[2])}</h${heading[1].length}>`);
+      else if (line.trim()) output.push(`<p>${inline(line)}</p>`);
+    }
+    if (inList) output.push('</ul>');
+    return output.join('');
+  };
   const button = (text, kind = '', attributes = '') => `<button class="button ${kind}" ${attributes}>${text}</button>`;
   const count = (value) => Number(value) || 0;
   const formatDate = (value) => {
@@ -914,7 +934,7 @@
     if(!conversations.length){const created=await api('/api/agent/conversations',{method:'POST'});conversations=[created];}
     activeConversationId=activeConversationId||Number(conversations[0].id);
     const detail=await api(`/api/agent/conversations/${activeConversationId}`), messages=detail.messages||[], confirmations=(detail.confirmations||[]).filter(item=>item.status==='pending');
-    const transcript=messages.map(message=>message.role==='tool'?toolResultMarkup(`tool${message.tool_name?` · ${message.tool_name}`:''}`,message.content,Boolean(message.is_error)):`<article class="chat-message ${esc(message.role)}"><small>${esc(message.role)}</small><div>${esc(message.content)}</div></article>`).join('');
+    const transcript=messages.map(message=>message.role==='tool'?toolResultMarkup(`tool${message.tool_name?` · ${message.tool_name}`:''}`,message.content,Boolean(message.is_error)):`<article class="chat-message ${esc(message.role)}"><small>${esc(message.role)}</small><div>${message.role==='assistant'?markdown(message.content):esc(message.content)}</div></article>`).join('');
     const pending=confirmations.map(item=>`<div class="notice error"><p>Confirm ${esc(item.action)} ${esc(item.arguments)}</p><div class="actions">${button('Confirm','danger',`data-confirm="${esc(item.id)}"`)}${button('Cancel','ghost',`data-cancel="${esc(item.id)}"`)}</div></div>`).join('');
     setView(`<div class="agent-layout"><aside class="card conversation-list"><div class="section-head"><h2>Conversations</h2>${button('New','ghost','data-new-conversation')}</div>${conversations.map(item=>`<button class="conversation-link ${Number(item.id)===activeConversationId?'active':''}" data-conversation="${esc(item.id)}">${esc(item.title)}</button>`).join('')}</aside><section class="card chat-panel"><div id="chat-log" class="chat-log">${transcript||'<div class="empty">Ask the agent to inspect, organize, or update your school workspace.</div>'}${pending}</div><form id="chat-form" class="chat-form"><label class="visually-hidden" for="chat-input">Message</label><textarea id="chat-input" rows="3" placeholder="Ask a question or request an action" required></textarea>${button('Send','primary','type="submit"')}</form></section></div>`);
     document.querySelectorAll('[data-conversation]').forEach(buttonEl=>buttonEl.onclick=()=>{activeConversationId=Number(buttonEl.dataset.conversation);agentPage();});
@@ -924,7 +944,7 @@
     const log=document.querySelector('#chat-log');
     requestAnimationFrame(()=>{log.scrollTop=log.scrollHeight;});
   }
-  async function streamAgentResponse(response,log){const reader=response.body.getReader(),decoder=new TextDecoder();let buffer='';while(true){const {done,value}=await reader.read();buffer+=decoder.decode(value||new Uint8Array(),{stream:!done});const lines=buffer.split('\n');buffer=lines.pop()||'';for(const line of lines){if(!line)continue;const item=JSON.parse(line);if(item.type==='tool')log.insertAdjacentHTML('beforeend',toolResultMarkup(`tool · ${item.action||'action'}`,item.result||'',Boolean(item.isError)));else log.insertAdjacentHTML('beforeend',`<article class="chat-message assistant ${item.type==='error'?'error':''}"><small>${esc(item.type)}</small><div>${esc(item.text||item.result||'')}</div></article>`);log.scrollTop=log.scrollHeight;}if(done)break;}}
+  async function streamAgentResponse(response,log){const reader=response.body.getReader(),decoder=new TextDecoder();let buffer='';while(true){const {done,value}=await reader.read();buffer+=decoder.decode(value||new Uint8Array(),{stream:!done});const lines=buffer.split('\n');buffer=lines.pop()||'';for(const line of lines){if(!line)continue;const item=JSON.parse(line);if(item.type==='tool')log.insertAdjacentHTML('beforeend',toolResultMarkup(`tool · ${item.action||'action'}`,item.result||'',Boolean(item.isError)));else log.insertAdjacentHTML('beforeend',`<article class="chat-message assistant ${item.type==='error'?'error':''}"><small>${esc(item.type)}</small><div>${markdown(item.text||item.result||'')}</div></article>`);log.scrollTop=log.scrollHeight;}if(done)break;}}
   async function sendAgentMessage(event){
     event.preventDefault();const input=document.querySelector('#chat-input'), send=event.currentTarget.querySelector('[type="submit"]'), log=document.querySelector('#chat-log'), text=input.value;input.value='';send.disabled=true;input.disabled=true;log.insertAdjacentHTML('beforeend',`<article class="chat-message user"><small>user</small><div>${esc(text)}</div></article>`);log.scrollTop=log.scrollHeight;
     try{const response=await fetch(`/api/agent/conversations/${activeConversationId}/messages`,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({text})});if(!response.ok)throw new Error(`Request failed (${response.status})`);await streamAgentResponse(response,log);await agentPage();}catch(error){notify(error.message,true);send.disabled=false;input.disabled=false;}
