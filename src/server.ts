@@ -4,9 +4,11 @@ import formbody from "@fastify/formbody";
 import multipart from "@fastify/multipart";
 import staticFiles from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
+import type { DocumentAgent } from "./agent.js";
 import { AuthService } from "./auth.js";
 import type { RuntimeConfig } from "./config.js";
 import type { AppDatabase } from "./database.js";
+import type { DocumentStore } from "./documents.js";
 import { assertApprovable } from "./event-validation.js";
 import type { GoogleService } from "./google.js";
 import type { OpenAIService } from "./openai.js";
@@ -14,7 +16,7 @@ import { isOpenRouterBatchSettings } from "./openrouter.js";
 import type { AppSettings, EventDraft, ModelProviderId, SchoolAssignmentInput, SchoolClassInput, SchoolTermInput } from "./types.js";
 import type { ScanWorker } from "./worker.js";
 
-interface Services { database: AppDatabase; google: GoogleService; openai: OpenAIService; worker: ScanWorker; }
+interface Services { database: AppDatabase; google: GoogleService; openai: OpenAIService; documents: DocumentStore; agent: DocumentAgent; worker: ScanWorker; }
 
 /** Builds the localhost web server and its authenticated JSON API. */
 export async function createServer(config: RuntimeConfig, services: Services): Promise<FastifyInstance> {
@@ -134,30 +136,33 @@ export async function createServer(config: RuntimeConfig, services: Services): P
   app.post("/api/assignments/:id/reopen", mutationGuard, async (request) => services.database.reopenAssignment(routeId(request.params)));
   app.delete("/api/assignments/:id", mutationGuard, async (request) => { services.database.deleteAssignment(routeId(request.params)); return { ok: true }; });
 
-  app.post("/api/school/imports", mutationGuard, async (request) => {
-    let text = "", instructions = "";
-    const images: Array<{ data: string; mimeType: string }> = [];
-    const accepted = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+  app.get("/api/documents", sessionGuard, async () => services.documents.list());
+  app.post("/api/documents", mutationGuard, async (request) => {
+    const saved = [];
     for await (const part of request.parts()) {
       if (part.type === "file") {
-        if (part.fieldname !== "images" || !accepted.has(part.mimetype)) throw new Error("Screenshots must be PNG, JPEG, WebP, or GIF files named images");
-        if (images.length >= 8) throw new Error("Upload at most 8 screenshots");
         const buffer = await part.toBuffer();
-        if (part.file.truncated) throw new Error("Each screenshot must be smaller than 5 MB");
-        if (!hasImageSignature(buffer, part.mimetype)) throw new Error("A screenshot's file contents do not match its image type");
-        images.push({ data: buffer.toString("base64"), mimeType: part.mimetype });
-      } else if (part.fieldname === "text") text = String(part.value).slice(0, 100_000);
-      else if (part.fieldname === "instructions") instructions = String(part.value).slice(0, 5000);
+        if (part.file.truncated) throw new Error("Each file must be smaller than 5 MB");
+        saved.push(services.documents.addSource(part.filename, part.mimetype || "application/octet-stream", buffer, "upload"));
+      } else if (part.fieldname === "text" && String(part.value).trim()) {
+        saved.push(services.documents.addSource("Pasted text.txt", "text/plain", Buffer.from(String(part.value).slice(0, 100_000)), "paste"));
+      }
     }
-    if (!text.trim() && !images.length) throw new Error("Provide text or at least one screenshot");
-    const school = await services.openai.analyzeSchoolImport(text, instructions, images);
-    const method = images.length ? (text.trim() ? "text+images" : "images") : "text";
-    return services.database.stageSchoolImport(method, school);
+    if (!saved.length) throw new Error("Provide pasted text or at least one file");
+    return saved;
   });
-  app.get("/api/school/imports", sessionGuard, async () => services.database.listSchoolImports());
-  app.get("/api/school/imports/:id", sessionGuard, async (request) => { const value = services.database.getSchoolImport(routeId(request.params)); if (!value) throw new Error("Pending school import not found"); return value; });
-  app.post("/api/school/imports/:id/apply", mutationGuard, async (request) => services.database.applySchoolImport(routeId(request.params), importSelections(request.body)));
-  app.delete("/api/school/imports/:id", mutationGuard, async (request) => { services.database.discardSchoolImport(routeId(request.params)); return { ok: true }; });
+  app.get("/api/agent/conversations", sessionGuard, async () => services.agent.listConversations());
+  app.post("/api/agent/conversations", mutationGuard, async () => services.agent.createConversation());
+  app.get("/api/agent/conversations/:id", sessionGuard, async (request) => services.agent.getConversation(routeId(request.params)));
+  app.post("/api/agent/conversations/:id/messages", mutationGuard, async (request, reply) => {
+    const text = stringBody(request.body, "text");
+    reply.hijack();
+    reply.raw.writeHead(200, { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
+    const emit = (event: Record<string, unknown>): void => { reply.raw.write(`${JSON.stringify(event)}\n`); };
+    try { await services.agent.run(routeId(request.params), text, emit); } catch (error) { emit({ type: "error", text: error instanceof Error ? error.message : String(error) }); }
+    reply.raw.end();
+  });
+  app.post("/api/agent/confirmations/:id", mutationGuard, async (request) => ({ result: await services.agent.resolveConfirmation(routeId(request.params), Boolean((request.body as { confirm?: unknown })?.confirm)) }));
 
   app.get("/api/candidates", sessionGuard, async (request) => {
     const status = (request.query as { status?: string }).status === "history" ? "history" : "pending";

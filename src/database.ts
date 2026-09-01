@@ -169,6 +169,16 @@ export class AppDatabase implements CredentialStore {
     return id;
   }
 
+  /** Stages an agent-requested Google Calendar change for the existing review queue. */
+  public saveAgentCandidate(draft: EventDraft, fingerprint: string, calendarId: string, changeKind: "create" | "update" | "cancel" = "create", relatedCandidateId?: number): EventCandidate {
+    const duplicate = changeKind === "create" ? this.findCandidateByFingerprint(fingerprint) : undefined;
+    if (duplicate) return this.getCandidate(duplicate)!;
+    if (changeKind !== "create" && (!relatedCandidateId || !this.getCandidate(relatedCandidateId))) throw new Error("Calendar updates and cancellations require a related candidate id");
+    const result = this.db.prepare(`INSERT INTO candidates(status,change_kind,related_candidate_id,title,start,end,timezone,location,description,organizer,registration_url,confidence,uncertainty_notes,source_excerpt,calendar_id,fingerprint) VALUES('pending',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(changeKind, relatedCandidateId ?? null, draft.title, draft.start, draft.end, draft.timezone, draft.location, draft.description, draft.organizer, draft.registrationUrl, draft.confidence, JSON.stringify(draft.uncertaintyNotes), draft.sourceExcerpt, calendarId, fingerprint);
+    return this.getCandidate(Number(result.lastInsertRowid))!;
+  }
+
   /** Lists candidate records for review or history. */
   public listCandidates(status: "pending" | "history" = "pending"): EventCandidate[] {
     const where = status === "pending" ? "c.status='pending'" : "c.status!='pending'";

@@ -110,6 +110,15 @@ export class GoogleService {
     };
   }
 
+  /** Reads a bounded Calendar window for agent duplicate and conflict checks. */
+  public async listEvents(calendarId: string, timeMin: string, timeMax: string): Promise<Array<{ id: string; title: string; start: string | null; end: string | null; location: string }>> {
+    if (!calendarId) throw new Error("Choose a calendar in Settings");
+    if (Number.isNaN(Date.parse(timeMin)) || Number.isNaN(Date.parse(timeMax)) || Date.parse(timeMax) <= Date.parse(timeMin)) throw new Error("Invalid Calendar date window");
+    if (Date.parse(timeMax) - Date.parse(timeMin) > 2 * 365 * 86_400_000) throw new Error("Calendar window must be two years or less");
+    const response = await this.calendar().events.list({ calendarId, timeMin, timeMax, singleEvents: true, orderBy: "startTime", maxResults: 500 });
+    return (response.data.items ?? []).flatMap((event) => event.id ? [{ id: event.id, title: event.summary ?? "", start: event.start?.dateTime ?? event.start?.date ?? null, end: event.end?.dateTime ?? event.end?.date ?? null, location: event.location ?? "" }] : []);
+  }
+
   /** Applies an approved create, update, or cancellation to Google Calendar. */
   public async applyCandidate(candidate: EventCandidate, related?: EventCandidate): Promise<string | null> {
     const calendar = this.calendar();

@@ -144,4 +144,55 @@ CREATE TABLE IF NOT EXISTS school_import_items (
   conflicts TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS school_import_items_import_idx ON school_import_items(import_id,id);
+
+CREATE TABLE IF NOT EXISTS document_folders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  parent_id INTEGER REFERENCES document_folders(id) ON DELETE SET NULL,
+  name TEXT NOT NULL,
+  path TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS documents (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  folder_id INTEGER NOT NULL REFERENCES document_folders(id),
+  name TEXT NOT NULL,
+  path TEXT NOT NULL UNIQUE,
+  mime_type TEXT NOT NULL,
+  source_kind TEXT NOT NULL,
+  immutable INTEGER NOT NULL DEFAULT 1,
+  derived_from_id INTEGER REFERENCES documents(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS documents_folder_idx ON documents(folder_id,name);
+CREATE TABLE IF NOT EXISTS agent_conversations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL DEFAULT 'New conversation',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS agent_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id INTEGER NOT NULL REFERENCES agent_conversations(id) ON DELETE CASCADE,
+  role TEXT NOT NULL CHECK(role IN ('user','assistant','tool')),
+  content TEXT NOT NULL,
+  tool_name TEXT,
+  tool_call_id TEXT,
+  is_error INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS agent_messages_conversation_idx ON agent_messages(conversation_id,id);
+CREATE TABLE IF NOT EXISTS agent_confirmations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id INTEGER NOT NULL REFERENCES agent_conversations(id) ON DELETE CASCADE,
+  action TEXT NOT NULL,
+  arguments TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','confirmed','cancelled')),
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  resolved_at TEXT
+);
+
+DELETE FROM school_import_items WHERE import_id IN (SELECT id FROM school_imports WHERE status='pending');
+UPDATE school_imports SET status='discarded' WHERE status='pending';
 `;

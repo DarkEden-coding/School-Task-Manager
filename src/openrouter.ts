@@ -1,4 +1,5 @@
-import { getSupportedThinkingLevels, type Model, type ThinkingLevelMap } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels, type AssistantMessage, type Message, type Model, type ThinkingLevelMap, type Tool } from "@earendil-works/pi-ai";
+import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { OPENROUTER_MODELS } from "@earendil-works/pi-ai/providers/openrouter.models";
 import type { AppDatabase } from "./database.js";
 import { buildClassifyPrompt, CLASSIFY_SYSTEM_PROMPT, CLASSIFY_TOOL, classifiedEmailFromToolCall, SCHOOL_IMPORT_SYSTEM_PROMPT, SCHOOL_IMPORT_TOOL, schoolItemsFromToolCall, type ApprovedEventRef, type ClassifiedEmail, type ClassifiedEvent, type EmailForModel } from "./classify.js";
@@ -14,6 +15,7 @@ interface OpenRouterCatalogEntry {
   top_provider?: { max_completion_tokens?: number | null };
   supported_parameters?: string[];
   reasoning?: { supported_efforts?: string[] | null };
+  architecture?: { input_modalities?: string[] };
 }
 
 const OPENROUTER_ORIGIN = "https://openrouter.ai";
@@ -115,6 +117,17 @@ export class OpenRouterService {
       }));
     // The live catalog lists plain slugs only; synthesize `:batch` variants so batch scans work with new models too.
     return [...models, ...models.filter((model) => !model.batch).map((model) => ({ ...model, id: `${model.id}:batch`, batch: true }))];
+  }
+
+  /** Completes one interactive vision and tool-calling agent turn. */
+  public async completeAgent(messages: Message[], tools: Tool[], systemPrompt: string, sessionId: string): Promise<AssistantMessage> {
+    const settings = this.database.getSettings();
+    if (isOpenRouterBatchModel(settings.modelId)) throw new Error("The document agent cannot use a batch model");
+    const model = await this.findCatalogModel(settings.modelId);
+    if (!model.input.includes("image")) throw new Error("Choose a vision-capable OpenRouter model in Settings");
+    const response = await completeSimple(model, { systemPrompt, messages, tools }, { apiKey: await this.apiKey(), ...(settings.reasoningLevel === "off" ? {} : { reasoning: settings.reasoningLevel }), sessionId, cacheRetention: "short", timeoutMs: 180_000 });
+    if (response.stopReason === "error" || response.stopReason === "aborted") throw new Error(response.errorMessage ?? "Agent request failed");
+    return response;
   }
 
   /** Extracts event candidates, using the Batch API whenever a `:batch` model is selected. */
@@ -390,7 +403,7 @@ function liveEntryToCatalogModel(entry: OpenRouterCatalogEntry): CatalogModel {
     provider: "openrouter",
     baseUrl: "https://openrouter.ai/api/v1",
     reasoning,
-    input: ["text"],
+    input: entry.architecture?.input_modalities?.includes("image") ? ["text", "image"] : ["text"],
     cost: { input: perMillion(entry.pricing?.prompt), output: perMillion(entry.pricing?.completion), cacheRead: perMillion(entry.pricing?.input_cache_read), cacheWrite: 0 },
     contextWindow: entry.context_length ?? 0,
     maxTokens: entry.top_provider?.max_completion_tokens ?? 0,

@@ -1,4 +1,4 @@
-import { createModels, getSupportedThinkingLevels, type AuthEvent, type AuthPrompt } from "@earendil-works/pi-ai";
+import { createModels, getSupportedThinkingLevels, type AssistantMessage, type AuthEvent, type AuthPrompt, type Message, type Tool } from "@earendil-works/pi-ai";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
 import { buildClassifyPrompt, CLASSIFY_SYSTEM_PROMPT, CLASSIFY_TOOL, classifiedEmailFromToolCall, SCHOOL_IMPORT_SYSTEM_PROMPT, SCHOOL_IMPORT_TOOL, schoolItemsFromToolCall, type ClassifiedEmail, type ClassifiedEvent, type EmailForModel } from "./classify.js";
 import type { AppDatabase } from "./database.js";
@@ -69,6 +69,17 @@ export class OpenAIService {
   /** Returns current OpenAI login progress without exposing tokens. */
   public loginStatus(): { state: string; events: AuthEvent[]; error: string | null } {
     return { state: this.#loginState, events: this.#loginEvents, error: this.#loginError };
+  }
+
+  /** Completes one vision-capable interactive agent turn with caller-supplied tools. */
+  public async completeAgent(messages: Message[], tools: Tool[], systemPrompt: string, sessionId: string): Promise<AssistantMessage> {
+    const settings = this.database.getSettings();
+    if (settings.modelProvider === "openrouter") return this.openrouter.completeAgent(messages, tools, systemPrompt, sessionId);
+    const model = this.models.getModel("openai-codex", settings.modelId) ?? (await this.models.getAvailable("openai-codex")).find((item) => item.input.includes("image"));
+    if (!model || !model.input.includes("image")) throw new Error("Choose a vision-capable OpenAI Codex model in Settings");
+    const response = await this.models.completeSimple(model, { systemPrompt, messages, tools }, { ...(settings.reasoningLevel === "off" ? {} : { reasoning: settings.reasoningLevel }), sessionId, cacheRetention: "short", timeoutMs: 180_000 });
+    if (response.stopReason === "error" || response.stopReason === "aborted") throw new Error(response.errorMessage ?? "Agent request failed");
+    return response;
   }
 
   /** Extracts school records through a dedicated interactive (never calendar) request. */
