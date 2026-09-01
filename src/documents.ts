@@ -90,8 +90,10 @@ export class DocumentStore {
 
   /** Permanently deletes a document after the caller obtains confirmation. */
   public deleteDocument(id: number): void {
-    const document = this.requireDocument(id);
-    rmSync(this.absolute(document.path));
+    const row = this.database.db.prepare("SELECT * FROM documents WHERE id=?").get(id) as Record<string, unknown> | undefined;
+    if (!row) return;
+    const document = documentRow(row);
+    rmSync(this.absolute(document.path), { force: true });
     this.database.db.prepare("DELETE FROM documents WHERE id=?").run(id);
   }
 

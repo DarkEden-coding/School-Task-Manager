@@ -19,6 +19,8 @@ test("document sources stay immutable and agent files stay inside the app root",
     store.editText(derived.id, "updated");
     assert.equal(readFileSync(join(store.root, derived.path), "utf8"), "updated");
     assert.equal(store.moveDocument(source.id, "Classes/Physics").path, "Classes/Physics/syllabus.txt");
+    store.deleteDocument(source.id);
+    assert.doesNotThrow(() => store.deleteDocument(source.id));
   } finally {
     database.close();
     rmSync(state, { recursive: true, force: true });
