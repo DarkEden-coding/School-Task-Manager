@@ -2,5 +2,15 @@ node_modules/
 dist/
 data/
 .env
+.env.*
+!.env.example
 *.log
 coverage/
+*.db
+*.sqlite
+*.sqlite3
+*.pem
+*.key
+credentials*.json
+client_secret*.json
+token*.json
