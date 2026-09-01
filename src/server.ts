@@ -162,7 +162,14 @@ export async function createServer(config: RuntimeConfig, services: Services): P
     try { await services.agent.run(routeId(request.params), text, emit); } catch (error) { emit({ type: "error", text: error instanceof Error ? error.message : String(error) }); }
     reply.raw.end();
   });
-  app.post("/api/agent/confirmations/:id", mutationGuard, async (request) => ({ result: await services.agent.resolveConfirmation(routeId(request.params), Boolean((request.body as { confirm?: unknown })?.confirm)) }));
+  app.post("/api/agent/confirmations/:id", mutationGuard, async (request, reply) => {
+    const confirm = Boolean((request.body as { confirm?: unknown })?.confirm);
+    reply.hijack();
+    reply.raw.writeHead(200, { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
+    const emit = (event: Record<string, unknown>): void => { reply.raw.write(`${JSON.stringify(event)}\n`); };
+    try { await services.agent.resolveConfirmation(routeId(request.params), confirm, emit); } catch (error) { emit({ type: "error", text: error instanceof Error ? error.message : String(error) }); }
+    reply.raw.end();
+  });
 
   app.get("/api/candidates", sessionGuard, async (request) => {
     const status = (request.query as { status?: string }).status === "history" ? "history" : "pending";

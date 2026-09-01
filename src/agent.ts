@@ -54,14 +54,21 @@ export class DocumentAgent {
 
   /** Executes a user message and emits durable progress records. */
   public async run(conversationId: number, text: string, emit: (event: AgentEvent) => void): Promise<void> {
+    return this.runLoop(conversationId, text, emit, true);
+  }
+
+  /** Runs either a new user turn or an automatic continuation after confirmation. */
+  private async runLoop(conversationId: number, text: string, emit: (event: AgentEvent) => void, recordUser: boolean): Promise<void> {
     if (this.#running) throw new Error("Another agent run is already active");
     if (!text.trim() || text.length > 20_000) throw new Error("Message must contain 1 to 20,000 characters");
     this.getConversation(conversationId);
     this.#running = true;
-    this.addMessage(conversationId, "user", text.trim());
-    this.database.db.prepare("UPDATE agent_conversations SET title=CASE WHEN title='New conversation' THEN substr(?,1,80) ELSE title END,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(text.trim(), conversationId);
+    if (recordUser) {
+      this.addMessage(conversationId, "user", text.trim());
+      this.database.db.prepare("UPDATE agent_conversations SET title=CASE WHEN title='New conversation' THEN substr(?,1,80) ELSE title END,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(text.trim(), conversationId);
+    }
     const transcript = this.database.db.prepare("SELECT role,content,tool_name FROM agent_messages WHERE conversation_id=? ORDER BY id DESC LIMIT 30").all(conversationId) as Array<{ role: string; content: string; tool_name: string | null }>;
-    const messages: Message[] = [{ role: "user", content: `Conversation history, oldest first:\n${transcript.reverse().map((row) => `${row.role}${row.tool_name ? ` ${row.tool_name}` : ""}: ${row.content}`).join("\n")}\n\nContinue by addressing the latest user message.`, timestamp: Date.now() }];
+    const messages: Message[] = [{ role: "user", content: `Conversation history, oldest first:\n${transcript.reverse().map((row) => `${row.role}${row.tool_name ? ` ${row.tool_name}` : ""}: ${row.content}`).join("\n")}\n\n${recordUser ? "Continue by addressing the latest user message." : text.trim()}`, timestamp: Date.now() }];
     try {
       emit({ type: "status", text: "Agent is working" });
       for (let step = 0; step < MAX_STEPS; step += 1) {
@@ -103,15 +110,16 @@ export class DocumentAgent {
     } finally { this.#running = false; }
   }
 
-  /** Resolves one pending destructive action and records its outcome. */
-  public async resolveConfirmation(id: number, confirm: boolean): Promise<string> {
+  /** Resolves one pending destructive action and automatically resumes after approval. */
+  public async resolveConfirmation(id: number, confirm: boolean, emit: (event: AgentEvent) => void): Promise<void> {
     const row = this.database.db.prepare("SELECT * FROM agent_confirmations WHERE id=? AND status='pending'").get(id) as { id: number; conversation_id: number; action: string; arguments: string } | undefined;
     if (!row) throw new Error("Pending confirmation not found");
     let result = "Action cancelled.";
     if (confirm) result = (await this.execute(row.action, JSON.parse(row.arguments) as Record<string, unknown>)).map((item) => item.type === "text" ? item.text : "[image]").join("\n");
     this.database.db.prepare("UPDATE agent_confirmations SET status=?,resolved_at=CURRENT_TIMESTAMP WHERE id=?").run(confirm ? "confirmed" : "cancelled", id);
     this.addMessage(row.conversation_id, "tool", result, undefined, row.action);
-    return result;
+    emit({ type: "tool", action: row.action, result, isError: false });
+    if (confirm) await this.runLoop(row.conversation_id, `The user confirmed ${row.action}. Its tool result is already in the history. Continue the interrupted task. You may stop now if the task is complete.`, emit, false);
   }
 
   private async execute(action: string, input: Record<string, unknown>): Promise<Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>> {
