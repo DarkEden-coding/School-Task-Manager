@@ -876,12 +876,13 @@
     const classes = schoolData.classes.filter(c => term && String(c.termId) === String(term.id));
     const open = openAssignments();
     const upcoming = open.filter(a => dueDate(a)).sort((a, b) => dueDate(a) - dueDate(b));
-    const groups = { Overdue: [], Today: [], Tomorrow: [] };
+    const overdue = upcoming.filter(a => dueDate(a) < new Date());
+    const groups = { Today: [], Tomorrow: [] };
 
     for (let i = 2; i <= 7; i += 1) groups[new Date(today.getTime() + i * 86400000).toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' })] = [];
-    upcoming.forEach(a => {
+    upcoming.filter(a => !overdue.includes(a)).forEach(a => {
       const due = localDay(dueDate(a), true);
-      const key = due < today ? 'Overdue' : due.getTime() === today.getTime() ? 'Today' : due.getTime() === today.getTime() + 86400000 ? 'Tomorrow' : due.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
+      const key = due.getTime() === today.getTime() ? 'Today' : due.getTime() === today.getTime() + 86400000 ? 'Tomorrow' : due.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
       if (groups[key]) groups[key].push(a);
     });
 
@@ -899,7 +900,8 @@
       ? `<section class="upcoming-group"><h3>${esc(day)}</h3>${assignments.map(a => `<div class="upcoming-assignment">${assignmentRow(a)}</div>`).join('')}</section>`
       : '').join('') || '<div class="empty">No upcoming work in the next week.</div>';
 
-    setView(`<div class="section-head"><div><h2>${esc(term?.name || 'No active term')}</h2><p class="muted">Your active term at a glance.</p></div><div class="actions">${button(calendarMode === 'list' ? 'Calendar' : 'List', 'ghost', 'data-calendar-toggle')}${button('New assignment', 'primary', 'data-new-assignment')}</div></div>${calendarMode === 'calendar' ? renderAssignmentCalendar() : `<div class="dashboard-layout"><section class="classes-panel"><div class="dashboard-panel-heading"><h2>Classes</h2><span>${classes.length}</span></div><div class="class-cards">${cards}</div></section><aside class="card upcoming-panel"><div class="dashboard-panel-heading"><div><h2>Upcoming</h2><p>Next 7 days</p></div></div><div class="upcoming-list">${list}</div></aside></div>`}`);
+    const overdueSection = overdue.length ? `<section class="card overdue-panel"><div class="dashboard-panel-heading"><div><h2>Overdue</h2><p>${overdue.length} assignment${overdue.length===1?'':'s'} need attention</p></div></div>${overdue.map(a=>`<div class="overdue-assignment">${assignmentRow(a)}</div>`).join('')}</section>` : '';
+    setView(`<div class="section-head"><div><h2>${esc(term?.name || 'No active term')}</h2><p class="muted">Your active term at a glance.</p></div><div class="actions">${button(calendarMode === 'list' ? 'Calendar' : 'List', 'ghost', 'data-calendar-toggle')}${button('New assignment', 'primary', 'data-new-assignment')}</div></div>${overdueSection}${calendarMode === 'calendar' ? renderAssignmentCalendar() : `<div class="dashboard-layout"><section class="classes-panel"><div class="dashboard-panel-heading"><h2>Classes</h2><span>${classes.length}</span></div><div class="class-cards">${cards}</div></section><aside class="card upcoming-panel"><div class="dashboard-panel-heading"><div><h2>Upcoming</h2><p>Next 7 days</p></div></div><div class="upcoming-list">${list}</div></aside></div>`}`);
     document.querySelector('[data-calendar-toggle]').onclick = () => { calendarMode = calendarMode === 'list' ? 'calendar' : 'list'; schoolDashboard(); };
     document.querySelectorAll('[data-class]').forEach(b => b.onclick = () => classDetail(b.dataset.class));
     document.querySelector('[data-new-assignment]')?.addEventListener('click', () => schoolData.classes.length ? assignmentForm() : notify('Create a term and class first.', true));

@@ -400,6 +400,12 @@ dialog.datetime-modal::backdrop { background: #0d0f11d8; }
 .class-card p,.class-card small { margin:0; color:var(--muted); font-size:13px; }
 .class-card .text-button { margin-top:auto; }
 .upcoming-panel { align-self:start; }
+.overdue-panel { margin-bottom:22px; border:2px solid var(--red); box-shadow:0 0 0 1px #6a364055, var(--shadow); }
+.overdue-panel h2 { color:#ffb4bf; }
+.overdue-panel .dashboard-panel-heading p { color:#e898a4; }
+.overdue-assignment { padding:0 12px; border:1px solid #6a3640; border-radius:10px; background:#38262b; }
+.overdue-assignment + .overdue-assignment { margin-top:9px; }
+.overdue-assignment .work-row { border-bottom:0; }
 .upcoming-list { display:grid; gap:18px; }
 .upcoming-group { margin:0; padding-top:16px; border-top:1px solid var(--border-strong); }
 .upcoming-group:first-child { padding-top:0; border-top:0; }
