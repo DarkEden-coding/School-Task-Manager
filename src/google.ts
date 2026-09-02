@@ -93,6 +93,23 @@ export class GoogleService {
     return queued;
   }
 
+  /** Searches Gmail with native query syntax and returns bounded message summaries. */
+  public async searchMessages(query: string, maxResults = 10): Promise<Array<{ id: string; threadId: string; subject: string; sender: string; date: string; snippet: string; gmailUrl: string }>> {
+    const normalized = query.trim();
+    if (!normalized) throw new Error("Gmail search query is required");
+    if (!Number.isInteger(maxResults) || maxResults < 1 || maxResults > 20) throw new Error("Gmail search result limit must be between 1 and 20");
+    const response = await this.gmail().users.messages.list({ userId: "me", q: normalized, maxResults });
+    return Promise.all((response.data.messages ?? []).flatMap((message) => message.id ? [message] : []).map(async (message) => {
+      const item = await this.gmail().users.messages.get({ userId: "me", id: message.id!, format: "metadata", metadataHeaders: ["Subject", "From", "Date"] });
+      const headers = headerMap(item.data.payload?.headers);
+      return {
+        id: message.id!, threadId: item.data.threadId ?? message.threadId ?? message.id!, subject: headers.subject ?? "", sender: headers.from ?? "",
+        date: headers.date ?? new Date(Number(item.data.internalDate ?? Date.now())).toISOString(), snippet: item.data.snippet ?? "",
+        gmailUrl: `https://mail.google.com/mail/u/0/#all/${message.id}`,
+      };
+    }));
+  }
+
   /** Fetches and cleans one complete Gmail message for model analysis. */
   public async getMessage(id: string): Promise<{ id: string; threadId: string; subject: string; sender: string; date: string; body: string; calendarText: string; gmailUrl: string }> {
     const response = await this.gmail().users.messages.get({ userId: "me", id, format: "full" });
