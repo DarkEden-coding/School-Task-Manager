@@ -140,17 +140,19 @@ export class GoogleService {
   public async applyCandidate(candidate: EventCandidate, related?: EventCandidate): Promise<string | null> {
     const calendar = this.calendar();
     const calendarId = candidate.calendarId;
+    const targetEventId = related?.calendarEventId ?? candidate.targetCalendarEventId;
+    const targetCalendarId = related?.calendarId ?? calendarId;
     if (candidate.changeKind === "cancel") {
-      if (!related?.calendarEventId) throw new Error("The original Calendar event is not linked");
-      try { await calendar.events.delete({ calendarId: related.calendarId, eventId: related.calendarEventId, sendUpdates: "none" }); }
+      if (!targetEventId) throw new Error("The original Calendar event is not linked");
+      try { await calendar.events.delete({ calendarId: targetCalendarId, eventId: targetEventId, sendUpdates: "none" }); }
       catch (error) { if (!hasHttpStatus(error, 404) && !hasHttpStatus(error, 410)) throw error; }
-      return related.calendarEventId;
+      return targetEventId;
     }
     const resource = toCalendarEvent(candidate);
     if (candidate.changeKind === "update") {
-      if (!related?.calendarEventId) throw new Error("The original Calendar event is not linked");
-      await calendar.events.patch({ calendarId: related.calendarId, eventId: related.calendarEventId, requestBody: resource, sendUpdates: "none" });
-      return related.calendarEventId;
+      if (!targetEventId) throw new Error("The original Calendar event is not linked");
+      await calendar.events.patch({ calendarId: targetCalendarId, eventId: targetEventId, requestBody: resource, sendUpdates: "none" });
+      return targetEventId;
     }
     const eventId = deterministicCalendarId(candidate.id);
     try {

@@ -101,6 +101,7 @@ export interface EventCandidate extends EventDraft {
   changeKind: ChangeKind;
   calendarId: string;
   calendarEventId: string | null;
+  targetCalendarEventId: string | null;
   sourceMessageIds: string[];
   createdAt: string;
   updatedAt: string;

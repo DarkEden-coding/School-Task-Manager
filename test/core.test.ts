@@ -75,6 +75,13 @@ test("school import does not cross term boundaries and Gmail retries deduplicate
   assert.throws(() => database.stageSchoolImport("text", []), /no school records/i);
 }));
 
+test("agent can stage an update for a Google Calendar event ID", () => withDatabase((database) => {
+  const draft = validateEventDraft({ title: "Moved lab", start: "2027-02-02T12:00:00Z", end: "2027-02-02T13:00:00Z", timezone: "UTC" }, "UTC");
+  const candidate = database.saveAgentCandidate(draft, eventFingerprint(draft), "calendar", "update", undefined, "google-event-id_123");
+  assert.equal(candidate.changeKind, "update");
+  assert.equal(candidate.targetCalendarEventId, "google-event-id_123");
+}));
+
 test("candidate validation rejects reversed dates", () => {
   assert.throws(() => validateEventDraft({ title: "Bad", start: "2027-01-02T12:00:00Z", end: "2027-01-02T11:00:00Z" }, "UTC"), /end must be after/i);
 });

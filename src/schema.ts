@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS candidates (
   source_excerpt TEXT NOT NULL DEFAULT '',
   calendar_id TEXT NOT NULL DEFAULT '',
   calendar_event_id TEXT,
+  target_calendar_event_id TEXT,
   fingerprint TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP

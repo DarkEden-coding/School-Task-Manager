@@ -30,6 +30,7 @@ export class AppDatabase implements CredentialStore {
     this.db.exec(SCHEMA);
     const candidateColumns = this.db.prepare("PRAGMA table_info(candidates)").all() as Array<{ name: string }>;
     if (!candidateColumns.some((column) => column.name === "source_url")) this.db.exec("ALTER TABLE candidates ADD COLUMN source_url TEXT NOT NULL DEFAULT ''");
+    if (!candidateColumns.some((column) => column.name === "target_calendar_event_id")) this.db.exec("ALTER TABLE candidates ADD COLUMN target_calendar_event_id TEXT");
     this.crypto = new CryptoStore(stateDir);
   }
 
@@ -172,12 +173,12 @@ export class AppDatabase implements CredentialStore {
   }
 
   /** Stages an agent-requested Google Calendar change for the existing review queue. */
-  public saveAgentCandidate(draft: EventDraft, fingerprint: string, calendarId: string, changeKind: "create" | "update" | "cancel" = "create", relatedCandidateId?: number): EventCandidate {
+  public saveAgentCandidate(draft: EventDraft, fingerprint: string, calendarId: string, changeKind: "create" | "update" | "cancel" = "create", relatedCandidateId?: number, targetCalendarEventId?: string): EventCandidate {
     const duplicate = changeKind === "create" ? this.findCandidateByFingerprint(fingerprint) : undefined;
     if (duplicate) return this.getCandidate(duplicate)!;
-    if (changeKind !== "create" && (!relatedCandidateId || !this.getCandidate(relatedCandidateId))) throw new Error("Calendar updates and cancellations require a related candidate id");
-    const result = this.db.prepare(`INSERT INTO candidates(status,change_kind,related_candidate_id,title,start,end,timezone,location,description,organizer,registration_url,source_url,confidence,uncertainty_notes,source_excerpt,calendar_id,fingerprint) VALUES('pending',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-      .run(changeKind, relatedCandidateId ?? null, draft.title, draft.start, draft.end, draft.timezone, draft.location, draft.description, draft.organizer, draft.registrationUrl, draft.sourceUrl, draft.confidence, JSON.stringify(draft.uncertaintyNotes), draft.sourceExcerpt, calendarId, fingerprint);
+    if (changeKind !== "create" && !targetCalendarEventId && (!relatedCandidateId || !this.getCandidate(relatedCandidateId))) throw new Error("Calendar updates and cancellations require a candidate ID or Google Calendar event ID");
+    const result = this.db.prepare(`INSERT INTO candidates(status,change_kind,related_candidate_id,title,start,end,timezone,location,description,organizer,registration_url,source_url,confidence,uncertainty_notes,source_excerpt,calendar_id,target_calendar_event_id,fingerprint) VALUES('pending',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(changeKind, relatedCandidateId ?? null, draft.title, draft.start, draft.end, draft.timezone, draft.location, draft.description, draft.organizer, draft.registrationUrl, draft.sourceUrl, draft.confidence, JSON.stringify(draft.uncertaintyNotes), draft.sourceExcerpt, calendarId, targetCalendarEventId ?? null, fingerprint);
     return this.getCandidate(Number(result.lastInsertRowid))!;
   }
 
@@ -494,6 +495,6 @@ function rowToCandidate(row: Record<string, unknown>): EventCandidate {
     timezone: String(row.timezone), location: String(row.location), description: String(row.description), organizer: String(row.organizer),
     registrationUrl: String(row.registration_url), sourceUrl: String(row.source_url), confidence: Number(row.confidence), uncertaintyNotes: JSON.parse(String(row.uncertainty_notes)) as string[],
     sourceExcerpt: String(row.source_excerpt), calendarId: String(row.calendar_id), calendarEventId: row.calendar_event_id ? String(row.calendar_event_id) : null,
-    sourceMessageIds: JSON.parse(String(row.source_ids)) as string[], createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+    targetCalendarEventId: row.target_calendar_event_id ? String(row.target_calendar_event_id) : null, sourceMessageIds: JSON.parse(String(row.source_ids)) as string[], createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   };
 }
