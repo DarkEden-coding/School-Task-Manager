@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { AppDatabase } from "../src/database.js";
+import type { DocumentAgent } from "../src/agent.js";
 import type { GoogleService } from "../src/google.js";
 import type { OpenAIService } from "../src/openai.js";
 import { ScanWorker } from "../src/worker.js";
@@ -16,7 +17,7 @@ test("successful scans advance and reuse the Gmail checkpoint", async () => {
     isConnected: () => true,
     queueMessages: async (_labels: string[], after?: number) => { checkpoints.push(after); return 0; },
   } as unknown as GoogleService;
-  const worker = new ScanWorker(database, google, {} as OpenAIService);
+  const worker = new ScanWorker(database, google, {} as OpenAIService, {} as DocumentAgent);
   try {
     await worker.scanNow();
     const first = database.getMarker("lastSuccessfulScan");

@@ -17,6 +17,7 @@ export function validateEventDraft(value: unknown, fallbackTimezone: string): Ev
     description: text(input.description, 5000),
     organizer: text(input.organizer, 300),
     registrationUrl: safeUrl(input.registrationUrl),
+    sourceUrl: safeUrl(input.sourceUrl),
     confidence: Math.min(1, Math.max(0, Number(input.confidence) || 0)),
     uncertaintyNotes: Array.isArray(input.uncertaintyNotes) ? input.uncertaintyNotes.slice(0, 10).map((item) => text(item, 500)).filter(Boolean) : [],
     sourceExcerpt: text(input.sourceExcerpt, 1000),
@@ -48,7 +49,7 @@ function nullableDate(value: unknown): string | null {
   return new Date(value).toISOString();
 }
 
-/** Accepts only HTTP registration URLs. */
+/** Accepts only HTTP URLs. */
 function safeUrl(value: unknown): string {
   const raw = text(value, 2000);
   if (!raw) return "";

@@ -122,8 +122,7 @@ export class OpenRouterService {
   /** Completes one interactive vision and tool-calling agent turn. */
   public async completeAgent(messages: Message[], tools: Tool[], systemPrompt: string, sessionId: string): Promise<AssistantMessage> {
     const settings = this.database.getSettings();
-    if (isOpenRouterBatchModel(settings.modelId)) throw new Error("The document agent cannot use a batch model");
-    const model = await this.findCatalogModel(settings.modelId);
+    const model = await this.findCatalogModel(openRouterInferenceModelId(settings.modelId));
     if (!model.input.includes("image")) throw new Error("Choose a vision-capable OpenRouter model in Settings");
     const response = await completeSimple(model, { systemPrompt, messages, tools }, { apiKey: await this.apiKey(), ...(settings.reasoningLevel === "off" ? {} : { reasoning: settings.reasoningLevel }), sessionId, cacheRetention: "short", timeoutMs: 180_000 });
     if (response.stopReason === "error" || response.stopReason === "aborted") throw new Error(response.errorMessage ?? "Agent request failed");

@@ -16,7 +16,7 @@ async function main(): Promise<void> {
   const openai = new OpenAIService(database);
   const documents = new DocumentStore(database, config.stateDir);
   const agent = new DocumentAgent(database, documents, google, openai);
-  const worker = new ScanWorker(database, google, openai);
+  const worker = new ScanWorker(database, google, openai, agent);
   const app = await createServer(config, { database, google, openai, documents, agent, worker });
 
   const shutdown = async (signal: string): Promise<void> => {

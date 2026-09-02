@@ -28,6 +28,8 @@ export class AppDatabase implements CredentialStore {
   public constructor(path: string, stateDir: string) {
     this.db = new DatabaseSync(path);
     this.db.exec(SCHEMA);
+    const candidateColumns = this.db.prepare("PRAGMA table_info(candidates)").all() as Array<{ name: string }>;
+    if (!candidateColumns.some((column) => column.name === "source_url")) this.db.exec("ALTER TABLE candidates ADD COLUMN source_url TEXT NOT NULL DEFAULT ''");
     this.crypto = new CryptoStore(stateDir);
   }
 
@@ -162,8 +164,8 @@ export class AppDatabase implements CredentialStore {
       this.db.prepare("INSERT OR IGNORE INTO candidate_messages(candidate_id,gmail_id) VALUES(?,?)").run(duplicate, gmailId);
       return duplicate;
     }
-    const result = this.db.prepare(`INSERT INTO candidates(status,change_kind,related_candidate_id,title,start,end,timezone,location,description,organizer,registration_url,confidence,uncertainty_notes,source_excerpt,calendar_id,fingerprint) VALUES('pending',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-      .run(changeKind, relatedCandidateId ?? null, draft.title, draft.start, draft.end, draft.timezone, draft.location, draft.description, draft.organizer, draft.registrationUrl, draft.confidence, JSON.stringify(draft.uncertaintyNotes), draft.sourceExcerpt, calendarId, fingerprint);
+    const result = this.db.prepare(`INSERT INTO candidates(status,change_kind,related_candidate_id,title,start,end,timezone,location,description,organizer,registration_url,source_url,confidence,uncertainty_notes,source_excerpt,calendar_id,fingerprint) VALUES('pending',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(changeKind, relatedCandidateId ?? null, draft.title, draft.start, draft.end, draft.timezone, draft.location, draft.description, draft.organizer, draft.registrationUrl, draft.sourceUrl, draft.confidence, JSON.stringify(draft.uncertaintyNotes), draft.sourceExcerpt, calendarId, fingerprint);
     const id = Number(result.lastInsertRowid);
     this.db.prepare("INSERT INTO candidate_messages(candidate_id,gmail_id) VALUES(?,?)").run(id, gmailId);
     return id;
@@ -174,8 +176,8 @@ export class AppDatabase implements CredentialStore {
     const duplicate = changeKind === "create" ? this.findCandidateByFingerprint(fingerprint) : undefined;
     if (duplicate) return this.getCandidate(duplicate)!;
     if (changeKind !== "create" && (!relatedCandidateId || !this.getCandidate(relatedCandidateId))) throw new Error("Calendar updates and cancellations require a related candidate id");
-    const result = this.db.prepare(`INSERT INTO candidates(status,change_kind,related_candidate_id,title,start,end,timezone,location,description,organizer,registration_url,confidence,uncertainty_notes,source_excerpt,calendar_id,fingerprint) VALUES('pending',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-      .run(changeKind, relatedCandidateId ?? null, draft.title, draft.start, draft.end, draft.timezone, draft.location, draft.description, draft.organizer, draft.registrationUrl, draft.confidence, JSON.stringify(draft.uncertaintyNotes), draft.sourceExcerpt, calendarId, fingerprint);
+    const result = this.db.prepare(`INSERT INTO candidates(status,change_kind,related_candidate_id,title,start,end,timezone,location,description,organizer,registration_url,source_url,confidence,uncertainty_notes,source_excerpt,calendar_id,fingerprint) VALUES('pending',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(changeKind, relatedCandidateId ?? null, draft.title, draft.start, draft.end, draft.timezone, draft.location, draft.description, draft.organizer, draft.registrationUrl, draft.sourceUrl, draft.confidence, JSON.stringify(draft.uncertaintyNotes), draft.sourceExcerpt, calendarId, fingerprint);
     return this.getCandidate(Number(result.lastInsertRowid))!;
   }
 
@@ -194,7 +196,7 @@ export class AppDatabase implements CredentialStore {
 
   /** Applies user edits to an unreviewed candidate. */
   public updateCandidate(id: number, patch: Partial<EventDraft & { calendarId: string }>): EventCandidate {
-    const fields: Record<string, string> = { title: "title", start: "start", end: "end", timezone: "timezone", location: "location", description: "description", organizer: "organizer", registrationUrl: "registration_url", confidence: "confidence", uncertaintyNotes: "uncertainty_notes", sourceExcerpt: "source_excerpt", calendarId: "calendar_id" };
+    const fields: Record<string, string> = { title: "title", start: "start", end: "end", timezone: "timezone", location: "location", description: "description", organizer: "organizer", registrationUrl: "registration_url", sourceUrl: "source_url", confidence: "confidence", uncertaintyNotes: "uncertainty_notes", sourceExcerpt: "source_excerpt", calendarId: "calendar_id" };
     for (const [key, column] of Object.entries(fields)) {
       if (!(key in patch)) continue;
       const value = key === "uncertaintyNotes" ? JSON.stringify(patch.uncertaintyNotes) : patch[key as keyof typeof patch] ?? null;
@@ -490,7 +492,7 @@ function rowToCandidate(row: Record<string, unknown>): EventCandidate {
     id: Number(row.id), status: row.status as CandidateStatus, changeKind: row.change_kind as EventCandidate["changeKind"],
     title: String(row.title), start: row.start ? String(row.start) : null, end: row.end ? String(row.end) : null,
     timezone: String(row.timezone), location: String(row.location), description: String(row.description), organizer: String(row.organizer),
-    registrationUrl: String(row.registration_url), confidence: Number(row.confidence), uncertaintyNotes: JSON.parse(String(row.uncertainty_notes)) as string[],
+    registrationUrl: String(row.registration_url), sourceUrl: String(row.source_url), confidence: Number(row.confidence), uncertaintyNotes: JSON.parse(String(row.uncertainty_notes)) as string[],
     sourceExcerpt: String(row.source_excerpt), calendarId: String(row.calendar_id), calendarEventId: row.calendar_event_id ? String(row.calendar_event_id) : null,
     sourceMessageIds: JSON.parse(String(row.source_ids)) as string[], createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   };

@@ -12,7 +12,6 @@ import type { DocumentStore } from "./documents.js";
 import { assertApprovable } from "./event-validation.js";
 import type { GoogleService } from "./google.js";
 import type { OpenAIService } from "./openai.js";
-import { isOpenRouterBatchSettings } from "./openrouter.js";
 import type { AppSettings, EventDraft, ModelProviderId, SchoolAssignmentInput, SchoolClassInput, SchoolTermInput } from "./types.js";
 import type { ScanWorker } from "./worker.js";
 
@@ -209,7 +208,7 @@ export async function createServer(config: RuntimeConfig, services: Services): P
       ...queue,
       paused: settings.scanPaused,
       running: worker.running,
-      batchMode: isOpenRouterBatchSettings(settings),
+      batchMode: false,
       batchState: worker.batchState,
       batchMessage: worker.batchMessage,
       runTotal: worker.runTotal,

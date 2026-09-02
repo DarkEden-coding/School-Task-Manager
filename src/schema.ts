@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS candidates (
   description TEXT NOT NULL DEFAULT '',
   organizer TEXT NOT NULL DEFAULT '',
   registration_url TEXT NOT NULL DEFAULT '',
+  source_url TEXT NOT NULL DEFAULT '',
   confidence REAL NOT NULL DEFAULT 0,
   uncertainty_notes TEXT NOT NULL DEFAULT '[]',
   source_excerpt TEXT NOT NULL DEFAULT '',

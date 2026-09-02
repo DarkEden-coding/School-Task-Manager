@@ -88,6 +88,7 @@ export interface EventDraft {
   description: string;
   organizer: string;
   registrationUrl: string;
+  sourceUrl: string;
   confidence: number;
   uncertaintyNotes: string[];
   sourceExcerpt: string;

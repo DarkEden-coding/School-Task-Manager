@@ -1,3 +1,4 @@
+import type { DocumentAgent } from "./agent.js";
 import type { AppDatabase } from "./database.js";
 import type { GoogleService } from "./google.js";
 import type { OpenAIService } from "./openai.js";
@@ -17,7 +18,7 @@ export class ScanWorker {
   #runCompleted = 0;
   #providerCompleted = 0;
 
-  public constructor(private readonly database: AppDatabase, private readonly google: GoogleService, private readonly openai: OpenAIService) {}
+  public constructor(private readonly database: AppDatabase, private readonly google: GoogleService, private readonly openai: OpenAIService, private readonly agent: DocumentAgent) {}
 
   /** Starts queue processing and the minute-level daily schedule check. */
   public start(): void {
@@ -102,8 +103,7 @@ export class ScanWorker {
     this.#runCompleted = 0;
     this.#providerCompleted = 0;
     try {
-      if (isOpenRouterBatchSettings(this.database.getSettings())) await this.processBatchQueue();
-      else await this.processStreamingQueue();
+      await this.processStreamingQueue();
     } finally {
       this.#processing = false;
       this.#batchState = "idle";
@@ -200,9 +200,7 @@ export class ScanWorker {
         this.#runTotal = Math.max(this.#runTotal, this.#runCompleted + this.database.getQueueStatus().queued + this.database.getQueueStatus().processing);
         try {
           const email = await this.google.getMessage(message.gmailId);
-          const classified = await this.openai.classifyEmail(email);
-          const calendarId = this.database.getSettings().calendarId;
-          for (const event of classified.events) this.database.saveCandidate(event.draft, message.gmailId, event.fingerprint, calendarId, event.changeKind, event.relatedCandidateId);
+          await this.agent.processEmail(email);
           this.database.finishMessage(message.gmailId);
           this.#lastError = null;
         } catch (error) {
@@ -219,7 +217,7 @@ export class ScanWorker {
         if (!stop) await sleep(1500);
       }
     };
-    await Promise.all([consume(), consume(), consume()]);
+    await consume();
   }
 
   /** Runs due scheduled scans and resumes queue work. */
