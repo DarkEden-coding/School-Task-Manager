@@ -7,6 +7,7 @@ import { schoolItemsFromToolCall } from "../src/classify.js";
 import { AppDatabase } from "../src/database.js";
 import { readableEmailBody } from "../src/google.js";
 import { eventFingerprint, validateEventDraft } from "../src/event-validation.js";
+import { isExpiredCodexAuthError } from "../src/openai.js";
 import { isOpenRouterBatchModel, OpenRouterService, openRouterInferenceModelId } from "../src/openrouter.js";
 
 test("dedicated school import tool rejects unsafe payload fields", () => {
@@ -143,6 +144,11 @@ test("claimAllQueued marks every queued message processing", () => withDatabase(
   assert.equal(database.getQueueStatus().queued, 0);
   assert.equal(database.getQueueStatus().processing, 2);
 }));
+
+test("expired Codex authentication errors are recognized", () => {
+  assert.equal(isExpiredCodexAuthError(new Error("Provided authentication token is expired")), true);
+  assert.equal(isExpiredCodexAuthError(new Error("Agent request timed out")), false);
+});
 
 test("OpenRouter batch slugs keep a separate inference id", () => {
   assert.equal(isOpenRouterBatchModel("anthropic/claude-sonnet-4.6:batch"), true);

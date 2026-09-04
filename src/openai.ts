@@ -77,9 +77,19 @@ export class OpenAIService {
     if (settings.modelProvider === "openrouter") return this.openrouter.completeAgent(messages, tools, systemPrompt, sessionId);
     const model = this.models.getModel("openai-codex", settings.modelId) ?? (await this.models.getAvailable("openai-codex")).find((item) => item.input.includes("image"));
     if (!model || !model.input.includes("image")) throw new Error("Choose a vision-capable OpenAI Codex model in Settings");
-    const response = await this.models.completeSimple(model, { systemPrompt, messages, tools }, { ...(settings.reasoningLevel === "off" ? {} : { reasoning: settings.reasoningLevel }), sessionId, cacheRetention: "short", timeoutMs: 180_000 });
-    if (response.stopReason === "error" || response.stopReason === "aborted") throw new Error(response.errorMessage ?? "Agent request failed");
+    const response = await this.models.completeSimple(model, { systemPrompt, messages, tools }, { ...(settings.reasoningLevel === "off" ? {} : { reasoning: settings.reasoningLevel }), sessionId, cacheRetention: "short", timeoutMs: 180_000 })
+      .catch((error: unknown) => this.rethrowCodexAuthError(error));
+    if (response.stopReason === "error" || response.stopReason === "aborted") await this.rethrowCodexAuthError(new Error(response.errorMessage ?? "Agent request failed"));
     return response;
+  }
+
+  /** Drops a rejected Codex credential so connection checks and Settings request a fresh login. */
+  private async rethrowCodexAuthError(error: unknown): Promise<never> {
+    if (isExpiredCodexAuthError(error)) {
+      await this.database.delete("openai-codex");
+      throw new Error("Your OpenAI Codex sign-in expired. Sign in again in Settings.");
+    }
+    throw error;
   }
 
   /** Extracts school records through a dedicated interactive (never calendar) request. */
@@ -137,6 +147,12 @@ export class OpenAIService {
     const call = response.content.find((block) => block.type === "toolCall" && block.name === CLASSIFY_TOOL.name);
     return classifiedEmailFromToolCall(call && call.type === "toolCall" ? call : undefined, settings.timezone, approved);
   }
+}
+
+/** Recognizes the provider error returned when a stored Codex token can no longer be refreshed. */
+export function isExpiredCodexAuthError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /authentication token is expired|token (?:has )?expired/i.test(message);
 }
 
 /** Answers provider-neutral OAuth prompts from the selected web setup method. */
