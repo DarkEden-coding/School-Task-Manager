@@ -57,7 +57,7 @@ a { color: #79adff; }
 .shell {
   position: relative;
   display: grid;
-  grid-template-columns: 245px 1fr;
+  grid-template-columns: 245px minmax(0, 1fr);
   min-height: 100vh;
 }
 .sidebar {
@@ -97,7 +97,7 @@ a { color: #79adff; }
 .sidebar nav .ico { display: inline-block; width: 25px; color: var(--blue); }
 .side-foot { margin-top: auto; padding: 10px; color: var(--muted); font-size: 12px; }
 .side-foot button { width: 100%; }
-.content { width: 100%; max-width: 1450px; margin: auto; padding: 34px 42px; }
+.content { width: 100%; min-width: 0; max-width: 1450px; margin: auto; padding: 34px 42px; }
 .topbar { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 30px; }
 .eyebrow { color: var(--blue); font-size: 11px; font-weight: 800; letter-spacing: 1.5px; text-transform: uppercase; }
 .topbar h1 { margin: 3px 0 0; font-size: 29px; line-height: 1.2; letter-spacing: -1px; }
@@ -419,14 +419,17 @@ dialog.datetime-modal::backdrop { background: #0d0f11d8; }
 .upcoming-assignment .actions { flex:0 0 auto; }
 .upcoming-assignment .actions .button { padding:7px 9px; font-size:12px; }
 .text-button { width:max-content; padding:0; border:0; color:#79adff; background:transparent; font-weight:700; }
-.work-row { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 0; border-bottom:1px solid var(--border); } .work-row small { display:block; color:var(--muted); font-size:12px; }
+.work-row { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 0; border-bottom:1px solid var(--border); }
+.work-row > div:first-child { min-width:0; overflow-wrap:anywhere; }
+.work-row small { display:block; color:var(--muted); font-size:12px; }
 .term-list { display:flex; flex-wrap:wrap; gap:8px; } .term-list button { padding:7px 10px; border:1px solid var(--border); border-radius:8px; color:var(--muted); background:var(--surface-soft); } .term-list button.active { color:#fff; border-color:#4c91f5; }
 .assignment-month { display:grid; grid-template-columns:repeat(7,1fr); gap:5px; } .assignment-month>b { padding:4px; color:var(--muted); font-size:11px; text-align:center; } .day-cell { min-height:105px; padding:6px; border:1px solid var(--border); border-radius:8px; background:var(--surface-soft); } .day-cell.outside { opacity:.45; } .day-cell>span { color:var(--muted); font-size:12px; }
 .due-mark { display:block; width:100%; margin-top:4px; overflow:hidden; padding:3px 5px; border:0; border-left:3px solid var(--red); border-radius:3px; color:#ffdce1; background:#492a31; font-size:11px; text-align:left; text-overflow:ellipsis; white-space:nowrap; } .due-mark i { display:inline-block; width:8px; height:3px; margin:0 3px 2px 0; background:var(--red); }
 .assignment-week { display:grid; grid-template-columns:repeat(7,minmax(110px,1fr)); overflow:auto; gap:7px; } .assignment-week>div { min-height:220px; padding:8px; border:1px solid var(--border); border-radius:8px; } .assignment-week b { color:var(--muted); font-size:12px; }
 .import-item { margin:10px 0; padding:12px; border:1px solid var(--border); border-radius:10px; } .import-item textarea { width:100%; margin-top:8px; padding:8px; border:1px solid var(--border); border-radius:7px; color:var(--text); background:var(--surface-inset); }
 details summary { cursor:pointer; color:#cbd2dc; font-weight:700; }
-@media(max-width:850px){.content{padding:20px 16px 82px}.dashboard-layout{grid-template-columns:1fr}.day-cell{min-height:78px}.assignment-month{min-width:630px}.card:has(.assignment-month){overflow:auto}.class-cards{grid-template-columns:1fr}.mobile-nav button{font-size:10px}}
+@media(max-width:1100px){.dashboard-layout{grid-template-columns:1fr}}
+@media(max-width:850px){.content{padding:20px 16px 82px}.day-cell{min-height:78px}.assignment-month{min-width:630px}.card:has(.assignment-month){overflow:auto}.class-cards{grid-template-columns:1fr}.mobile-nav button{font-size:10px}}
 @media(max-width:520px){.upcoming-assignment .work-row{align-items:flex-start;flex-direction:column}.upcoming-assignment .actions{width:100%}.upcoming-assignment .actions .button{flex:1}}
 .document-tree { display:grid; gap:16px; }
 .document-folder { padding:14px; border:1px solid var(--border); border-radius:10px; background:var(--surface-soft); }
