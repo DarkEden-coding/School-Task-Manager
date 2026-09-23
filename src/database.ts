@@ -4,6 +4,7 @@ import { SCHEMA } from "./schema.js";
 import type { AppSettings, CandidateStatus, EventCandidate, EventDraft, ExtractedSchoolItem, MessageStatus, QueueStatus, ReasoningLevel, SchoolAssignment, SchoolAssignmentInput, SchoolClass, SchoolClassInput, SchoolDashboard, SchoolImportLog, SchoolImportProposal, SchoolTerm, SchoolTermInput } from "./types.js";
 import { matchSchoolItems, resolveImportedClass, resolveImportedTerm } from "./school-import.js";
 import { CryptoStore } from "./crypto-store.js";
+import type { JevScores } from "./jev.js";
 
 const DEFAULT_SETTINGS: AppSettings = {
   timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
@@ -31,6 +32,11 @@ export class AppDatabase implements CredentialStore {
     const candidateColumns = this.db.prepare("PRAGMA table_info(candidates)").all() as Array<{ name: string }>;
     if (!candidateColumns.some((column) => column.name === "source_url")) this.db.exec("ALTER TABLE candidates ADD COLUMN source_url TEXT NOT NULL DEFAULT ''");
     if (!candidateColumns.some((column) => column.name === "target_calendar_event_id")) this.db.exec("ALTER TABLE candidates ADD COLUMN target_calendar_event_id TEXT");
+    const messageColumns = this.db.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>;
+    if (!messageColumns.some((column) => column.name === "jev_result")) this.db.exec("ALTER TABLE messages ADD COLUMN jev_result TEXT");
+    if (!messageColumns.some((column) => column.name === "jev_scores")) this.db.exec("ALTER TABLE messages ADD COLUMN jev_scores TEXT");
+    if (!messageColumns.some((column) => column.name === "jev_override")) this.db.exec("ALTER TABLE messages ADD COLUMN jev_override INTEGER NOT NULL DEFAULT 0");
+    if (!messageColumns.some((column) => column.name === "jev_override_date")) this.db.exec("ALTER TABLE messages ADD COLUMN jev_override_date TEXT");
     this.crypto = new CryptoStore(stateDir);
   }
 
@@ -105,9 +111,38 @@ export class AppDatabase implements CredentialStore {
   }
 
   /** Claims the oldest queued message for processing. */
-  public claimMessage(): { gmailId: string; threadId: string; attempts: number } | undefined {
-    const row = this.db.prepare(`UPDATE messages SET status='processing', attempts=attempts+1, updated_at=CURRENT_TIMESTAMP WHERE rowid=(SELECT rowid FROM messages WHERE status='queued' ORDER BY internal_date LIMIT 1) RETURNING gmail_id, thread_id, attempts`).get() as { gmail_id: string; thread_id: string; attempts: number } | undefined;
-    return row ? { gmailId: row.gmail_id, threadId: row.thread_id, attempts: row.attempts } : undefined;
+  public claimMessage(): { gmailId: string; threadId: string; attempts: number; jevResult: string | null; override: boolean } | undefined {
+    const row = this.db.prepare(`UPDATE messages SET status='processing', attempts=attempts+1, updated_at=CURRENT_TIMESTAMP WHERE rowid=(SELECT rowid FROM messages WHERE status='queued' ORDER BY internal_date LIMIT 1) RETURNING gmail_id, thread_id, attempts, jev_result, jev_override`).get() as { gmail_id: string; thread_id: string; attempts: number; jev_result: string | null; jev_override: number } | undefined;
+    return row ? { gmailId: row.gmail_id, threadId: row.thread_id, attempts: row.attempts, jevResult: row.jev_result, override: Boolean(row.jev_override) } : undefined;
+  }
+
+  /** Persists a Jev decision before sending a passed email to the full model. */
+  public saveJevResult(gmailId: string, result: "passed" | "error", scores: JevScores | null): void {
+    this.db.prepare("UPDATE messages SET jev_result=?, jev_scores=?, updated_at=CURRENT_TIMESTAMP WHERE gmail_id=?").run(result, scores ? JSON.stringify(scores) : null, gmailId);
+  }
+
+  /** Finishes a skipped email without sending it to the full model. */
+  public skipJevMessage(gmailId: string, scores: JevScores): void {
+    this.db.prepare("UPDATE messages SET jev_result='skipped', jev_scores=?, status='processed', processed_at=CURRENT_TIMESTAMP, last_error=NULL, updated_at=CURRENT_TIMESTAMP WHERE gmail_id=?").run(JSON.stringify(scores), gmailId);
+  }
+
+  /** Lists recent classified emails with safe-to-display Jev decisions. */
+  public listProcessedMessages(limit = 100, offset = 0): Array<{ id: string; subject: string; sender: string; internalDate: string; status: MessageStatus; processedAt: string | null; jevResult: string | null; jevScores: JevScores | null; overrideAt: string | null; override: boolean; lastError: string | null }> {
+    const rows = this.db.prepare("SELECT gmail_id,subject,sender,internal_date,status,processed_at,jev_result,jev_scores,jev_override_date,jev_override,last_error FROM messages WHERE status='processed' OR jev_result IS NOT NULL ORDER BY internal_date DESC LIMIT ? OFFSET ?").all(limit, offset) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({ id: String(row.gmail_id), subject: String(row.subject), sender: String(row.sender), internalDate: String(row.internal_date), status: row.status as MessageStatus, processedAt: row.processed_at as string | null, jevResult: row.jev_result as string | null, jevScores: row.jev_scores ? JSON.parse(String(row.jev_scores)) as JevScores : null, overrideAt: row.jev_override_date as string | null, override: Boolean(row.jev_override), lastError: row.last_error as string | null }));
+  }
+
+  /** Marks a skipped email for direct main-model processing at the next scheduled scan. */
+  public scheduleJevOverride(gmailId: string, localDate: string): void {
+    const updated = this.db.prepare("UPDATE messages SET jev_override=1, jev_override_date=?, updated_at=CURRENT_TIMESTAMP WHERE gmail_id=? AND status='processed' AND jev_result='skipped' AND jev_override=0").run(localDate, gmailId);
+    if (updated.changes) return;
+    const row = this.db.prepare("SELECT jev_override FROM messages WHERE gmail_id=? AND jev_result='skipped'").get(gmailId) as { jev_override: number } | undefined;
+    if (!row?.jev_override) throw new Error("Only Jev-skipped emails can be overridden");
+  }
+
+  /** Releases due overrides to the existing durable queue, preserving Jev scores. */
+  public releaseJevOverrides(localDate: string): number {
+    return Number(this.db.prepare("UPDATE messages SET status='queued', attempts=0, jev_override_date=NULL, last_error=NULL, updated_at=CURRENT_TIMESTAMP WHERE status='processed' AND jev_override=1 AND jev_override_date<=?").run(localDate).changes);
   }
 
   /** Returns abandoned processing rows to the queue so workers can retry them. */

@@ -2,6 +2,7 @@ import { getSupportedThinkingLevels, type AssistantMessage, type Message, type M
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { OPENROUTER_MODELS } from "@earendil-works/pi-ai/providers/openrouter.models";
 import type { AppDatabase } from "./database.js";
+import { scoreEmailWithJev, type JevScores } from "./jev.js";
 import { buildClassifyPrompt, CLASSIFY_SYSTEM_PROMPT, CLASSIFY_TOOL, classifiedEmailFromToolCall, SCHOOL_IMPORT_SYSTEM_PROMPT, SCHOOL_IMPORT_TOOL, schoolItemsFromToolCall, type ApprovedEventRef, type ClassifiedEmail, type ClassifiedEvent, type EmailForModel } from "./classify.js";
 import type { AvailableModel, ModelProviderId, ReasoningLevel } from "./types.js";
 
@@ -127,6 +128,14 @@ export class OpenRouterService {
     const response = await completeSimple(model, { systemPrompt, messages, tools }, { apiKey: await this.apiKey(), ...(settings.reasoningLevel === "off" ? {} : { reasoning: settings.reasoningLevel }), sessionId, cacheRetention: "short", timeoutMs: 180_000 });
     if (response.stopReason === "error" || response.stopReason === "aborted") throw new Error(response.errorMessage ?? "Agent request failed");
     return response;
+  }
+
+  /** Scores an email using the saved OpenRouter key before expensive extraction. */
+  public async prefilterEmail(email: EmailForModel): Promise<JevScores> {
+    const school = this.database.getSchoolDashboard();
+    const activeTerms = new Set(school.terms.filter((term) => term.status === "active").map((term) => term.id));
+    const courses = school.classes.filter((item) => activeTerms.has(item.termId)).map((item) => item.code || item.name);
+    return scoreEmailWithJev(email, this.database.getSettings(), courses, await this.apiKey());
   }
 
   /** Extracts event candidates, using the Batch API whenever a `:batch` model is selected. */

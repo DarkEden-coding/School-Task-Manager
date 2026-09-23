@@ -3,11 +3,13 @@ import type { GoogleService } from "./google.js";
 import type { OpenAIService } from "./openai.js";
 import type { ClassifiedEmail, EmailForModel } from "./classify.js";
 import type { QueueStatus } from "./types.js";
+import { shouldProcessJevScores } from "./jev.js";
 
 /** Coordinates Gmail discovery, persistent queue processing, and daily scheduling. */
 export class ScanWorker {
   #processing = false;
   #filling = false;
+  #stopped = false;
   #timer: NodeJS.Timeout | null = null;
   #lastError: string | null = null;
   #batchState: QueueStatus["batchState"] = "idle";
@@ -21,13 +23,14 @@ export class ScanWorker {
   /** Starts queue processing and the minute-level daily schedule check. */
   public start(): void {
     if (this.#timer) return;
+    this.#stopped = false;
     this.database.reclaimProcessing();
     this.#timer = setInterval(() => void this.tick(), 60_000);
     void this.tick();
   }
 
   /** Stops future worker activity. */
-  public stop(): void { if (this.#timer) clearInterval(this.#timer); this.#timer = null; }
+  public stop(): void { this.#stopped = true; if (this.#timer) clearInterval(this.#timer); this.#timer = null; }
 
   /** Returns transient worker state for the dashboard. */
   public status(): { running: boolean; lastError: string | null; batchState: QueueStatus["batchState"]; batchMessage: string | null; runTotal: number; runCompleted: number; providerCompleted: number } {
@@ -94,9 +97,20 @@ export class ScanWorker {
     }
   }
 
+  /** Schedules a Jev-skipped email to bypass Jev on the next daily scan. */
+  public scheduleJevOverride(gmailId: string): void {
+    const settings = this.database.getSettings();
+    const local = localClock(settings.timezone);
+    const alreadyScanned = this.database.getMarker("lastScheduledDate") === local.date;
+    const nextDate = alreadyScanned || local.time >= settings.scanTime
+      ? new Date(Date.parse(`${local.date}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10)
+      : local.date;
+    this.database.scheduleJevOverride(gmailId, nextDate);
+  }
+
   /** Processes the durable queue using streaming workers or one full OpenRouter batch. */
   public async processQueue(): Promise<void> {
-    if (this.#processing || this.database.getSettings().scanPaused) return;
+    if (this.#stopped || this.#processing || this.database.getSettings().scanPaused) return;
     this.#processing = true;
     this.#runCompleted = 0;
     this.#providerCompleted = 0;
@@ -105,6 +119,8 @@ export class ScanWorker {
     } finally {
       this.#processing = false;
       this.#batchState = "idle";
+      // A scan can queue mail while an empty consumer is winding down.
+      if (!this.#stopped && !this.database.getSettings().scanPaused && this.database.getQueueStatus().queued) void this.processQueue();
     }
   }
 
@@ -196,7 +212,30 @@ export class ScanWorker {
         }
         this.#runTotal = Math.max(this.#runTotal, this.#runCompleted + this.database.getQueueStatus().queued + this.database.getQueueStatus().processing);
         try {
+          if (message.jevResult === "skipped" && !message.override) {
+            this.database.finishMessage(message.gmailId);
+            this.#runCompleted += 1;
+            await sleep(1500);
+            continue;
+          }
           const email = await this.google.getMessage(message.gmailId);
+          if (!message.override && !message.jevResult) {
+            try {
+              if (await this.openai.openrouter.isConnected()) {
+                const scores = await this.openai.openrouter.prefilterEmail(email);
+                if (!shouldProcessJevScores(scores)) {
+                  this.database.skipJevMessage(message.gmailId, scores);
+                  this.#runCompleted += 1;
+                  await sleep(1500);
+                  continue;
+                }
+                this.database.saveJevResult(message.gmailId, "passed", scores);
+              }
+            } catch {
+              // A failed pre-filter must never lose an email.
+              this.database.saveJevResult(message.gmailId, "error", null);
+            }
+          }
           const classified = await this.openai.classifyEmail(email);
           this.stageClassification(message.gmailId, classified);
           this.database.finishMessage(message.gmailId);
@@ -234,6 +273,7 @@ export class ScanWorker {
     const lastDate = this.database.getMarker("lastScheduledDate");
     if (local.time >= settings.scanTime && local.date !== lastDate) {
       this.database.setMarker("lastScheduledDate", local.date);
+      this.database.releaseJevOverrides(local.date);
       try { await this.scanNow("scheduled"); } catch { /* exposed through status */ }
     }
   }

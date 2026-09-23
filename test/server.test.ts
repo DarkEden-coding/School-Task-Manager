@@ -12,6 +12,28 @@ import type { ScanWorker } from "../src/worker.js";
 
 const config = { host: "127.0.0.1", port: 8787, baseUrl: "http://127.0.0.1:8787", secureCookies: false } as const;
 
+test("processed email override requires a session and CSRF token", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "email-manager-server-"));
+  const database = new AppDatabase(join(directory, "test.sqlite"), directory);
+  database.queueMessage({ id: "mail-skipped", threadId: "thread", internalDate: "1234567890000", subject: "General notice" });
+  database.claimMessage();
+  database.skipJevMessage("mail-skipped", { school: 0.03, event: 0.04, opportunity: 0.06 });
+  const worker = { scheduleJevOverride: (id: string) => database.scheduleJevOverride(id, "2027-04-02") } as unknown as ScanWorker;
+  const app = await createServer({ ...config, stateDir: directory }, { database, google: {} as GoogleService, openai: {} as OpenAIService, worker });
+  try {
+    assert.equal((await app.inject({ method: "GET", url: "/api/messages" })).statusCode, 401);
+    const setup = await app.inject({ method: "POST", url: "/api/auth/setup", payload: { password: "correct horse battery staple" } });
+    const cookie = { cookie: `email_manager_session=${setup.cookies[0]?.value}` };
+    const csrf = setup.json().csrfToken as string;
+    const list = await app.inject({ method: "GET", url: "/api/messages", headers: cookie });
+    assert.equal(list.json()[0].jevResult, "skipped");
+    assert.equal(list.json()[0].subject, "General notice");
+    assert.equal((await app.inject({ method: "POST", url: "/api/messages/mail-skipped/override", headers: cookie })).statusCode, 403);
+    assert.equal((await app.inject({ method: "POST", url: "/api/messages/mail-skipped/override", headers: { ...cookie, "x-csrf-token": csrf } })).statusCode, 200);
+    assert.equal(database.listProcessedMessages()[0]?.overrideAt, "2027-04-02");
+  } finally { await app.close(); database.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("approval is idempotent across repeated requests", async () => {
   const directory = mkdtempSync(join(tmpdir(), "email-manager-server-"));
   const database = new AppDatabase(join(directory, "test.sqlite"), directory);

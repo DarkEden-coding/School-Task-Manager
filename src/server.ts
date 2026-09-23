@@ -223,6 +223,20 @@ export async function createServer(config: RuntimeConfig, services: Services): P
     if (!services.database.getSettings().scanPaused) void services.worker.processQueue();
     return { retried };
   });
+  app.get("/api/messages", sessionGuard, async (request) => {
+    const query = request.query as { limit?: string; offset?: string };
+    const limit = query.limit === undefined ? 100 : Number(query.limit);
+    const offset = query.offset === undefined ? 0 : Number(query.offset);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new Error("limit must be between 1 and 200");
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("offset must be a nonnegative integer");
+    return services.database.listProcessedMessages(limit, offset);
+  });
+  app.post("/api/messages/:id/override", mutationGuard, async (request) => {
+    const gmailId = stringBody(request.params, "id");
+    if (gmailId.length > 128) throw new Error("Invalid message id");
+    services.worker.scheduleJevOverride(gmailId);
+    return { ok: true };
+  });
 
   app.setNotFoundHandler(async (request, reply) => request.url.startsWith("/api/") ? reply.code(404).send({ error: "Not found" }) : reply.sendFile("index.html"));
   app.setErrorHandler(async (failure, request, reply) => {

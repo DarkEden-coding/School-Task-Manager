@@ -465,3 +465,24 @@ details summary { cursor:pointer; color:#cbd2dc; font-weight:700; }
 .assignment-week .warning-segment { margin:8px 0 4px; }
 .detail-grid a { color:#8ab7ff; overflow-wrap:anywhere; }
 .import-noop { border-left:3px solid #5b6673; opacity:.8; }
+
+/* Jev pre-filter review */
+.email-list { display: grid; }
+.email-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; padding: 15px 0; border-bottom: 1px solid #34383e; }
+.email-item:last-child { padding-bottom: 0; border-bottom: 0; }
+.email-main { min-width: 0; }
+.email-main > p { margin: 3px 0; color: var(--muted); font-size: 13px; }
+.email-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 8px; color: var(--muted); font-size: 12px; }
+.jev-scores { color: #b8c5d8; font-variant-numeric: tabular-nums; }
+.tag.jev-passed { border-color: #36554a; color: #a7e4cd; background: #27352f; }
+.tag.jev-skipped { border-color: #665633; color: #f0cf83; background: #3b3323; }
+.tag.jev-error { border-color: #6a3640; color: #ffd3db; background: #38262b; }
+.tag.jev-override { border-color: #3d5781; color: #b6d2ff; background: #28354a; }
+.tag.jev-legacy { border-color: #4a4e55; color: #c1c6ce; background: #2b2e33; }
+.email-actions { align-self: start; justify-content: flex-end; }
+@media (max-width: 650px) {
+  .email-item { grid-template-columns: 1fr; }
+  .email-actions { justify-content: flex-start; }
+  .mobile-nav { justify-content: flex-start; overflow-x: auto; }
+  .mobile-nav button { flex: 0 0 auto; }
+}
