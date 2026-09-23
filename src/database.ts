@@ -249,6 +249,11 @@ export class AppDatabase implements CredentialStore {
     return row?.related_candidate_id ?? undefined;
   }
 
+  /** Denies every currently pending calendar proposal in one database update. */
+  public denyPendingCandidates(): number {
+    return Number(this.db.prepare("UPDATE candidates SET status='denied', updated_at=CURRENT_TIMESTAMP WHERE status='pending'").run().changes);
+  }
+
   /** Changes candidate review state and optionally records a Calendar event id. */
   public setCandidateStatus(id: number, status: CandidateStatus, calendarEventId?: string | null): void {
     this.db.prepare("UPDATE candidates SET status=?, calendar_event_id=COALESCE(?,calendar_event_id), updated_at=CURRENT_TIMESTAMP WHERE id=?").run(status, calendarEventId ?? null, id);

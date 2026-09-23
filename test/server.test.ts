@@ -65,6 +65,17 @@ test("approval is idempotent across repeated requests", async () => {
     assert.equal(second.statusCode, 200);
     assert.equal(writes, 1);
 
+    const secondId = database.saveCandidate({ ...draft, title: "Second hike" }, "mail", "second-hike", "calendar");
+    const thirdId = database.saveCandidate({ ...draft, title: "Third hike" }, "mail", "third-hike", "calendar");
+    assert.equal((await app.inject({ method: "POST", url: "/api/candidates/deny-all" })).statusCode, 401);
+    assert.equal((await app.inject({ method: "POST", url: "/api/candidates/deny-all", headers: cookieHeader })).statusCode, 403);
+    const denied = await app.inject({ method: "POST", url: "/api/candidates/deny-all", headers });
+    assert.equal(denied.json().denied, 2);
+    assert.equal(database.getCandidate(secondId)?.status, "denied");
+    assert.equal(database.getCandidate(thirdId)?.status, "denied");
+    assert.equal(database.getCandidate(id)?.status, "approved");
+    assert.equal((await app.inject({ method: "POST", url: "/api/candidates/deny-all", headers })).json().denied, 0);
+
     const termPayload = { name: "Fall 2027", start: "2027-08-01", end: "2027-12-20", status: "active" };
     assert.equal((await app.inject({ method: "POST", url: "/api/terms", headers: cookieHeader, payload: termPayload })).statusCode, 403);
     const term = await app.inject({ method: "POST", url: "/api/terms", headers, payload: termPayload });

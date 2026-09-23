@@ -174,6 +174,7 @@ export async function createServer(config: RuntimeConfig, services: Services): P
     const status = (request.query as { status?: string }).status === "history" ? "history" : "pending";
     return services.database.listCandidates(status);
   });
+  app.post("/api/candidates/deny-all", mutationGuard, async () => ({ denied: services.database.denyPendingCandidates() }));
   app.patch("/api/candidates/:id", mutationGuard, async (request) => services.database.updateCandidate(routeId(request.params), request.body as Partial<EventDraft & { calendarId: string }>));
   app.post("/api/candidates/:id/deny", mutationGuard, async (request) => {
     const id = routeId(request.params);
