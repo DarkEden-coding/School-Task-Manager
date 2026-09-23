@@ -14,7 +14,7 @@
     "test": "node --import tsx --test test/**/*.test.ts"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "^0.84.3",
+    "@earendil-works/pi-ai": "^0.87.1",
     "@fastify/cookie": "^11.1.2",
     "@fastify/formbody": "^9.0.0",
     "@fastify/multipart": "^10.1.1",

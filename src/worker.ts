@@ -1,9 +1,7 @@
-import type { DocumentAgent } from "./agent.js";
 import type { AppDatabase } from "./database.js";
 import type { GoogleService } from "./google.js";
 import type { OpenAIService } from "./openai.js";
-import type { EmailForModel } from "./classify.js";
-import { isOpenRouterBatchSettings } from "./openrouter.js";
+import type { ClassifiedEmail, EmailForModel } from "./classify.js";
 import type { QueueStatus } from "./types.js";
 
 /** Coordinates Gmail discovery, persistent queue processing, and daily scheduling. */
@@ -18,7 +16,7 @@ export class ScanWorker {
   #runCompleted = 0;
   #providerCompleted = 0;
 
-  public constructor(private readonly database: AppDatabase, private readonly google: GoogleService, private readonly openai: OpenAIService, private readonly agent: DocumentAgent) {}
+  public constructor(private readonly database: AppDatabase, private readonly google: GoogleService, private readonly openai: OpenAIService) {}
 
   /** Starts queue processing and the minute-level daily schedule check. */
   public start(): void {
@@ -157,11 +155,10 @@ export class ScanWorker {
       });
       this.#batchState = "applying";
       this.#batchMessage = "Applying batch results…";
-      const calendarId = this.database.getSettings().calendarId;
       for (const result of results) {
         if (result.error) this.database.finishMessage(result.emailId, result.error);
         else {
-          for (const event of result.events) this.database.saveCandidate(event.draft, result.emailId, event.fingerprint, calendarId, event.changeKind, event.relatedCandidateId);
+          this.stageClassification(result.emailId, result);
           this.database.finishMessage(result.emailId);
           this.#lastError = null;
         }
@@ -200,7 +197,8 @@ export class ScanWorker {
         this.#runTotal = Math.max(this.#runTotal, this.#runCompleted + this.database.getQueueStatus().queued + this.database.getQueueStatus().processing);
         try {
           const email = await this.google.getMessage(message.gmailId);
-          await this.agent.processEmail(email);
+          const classified = await this.openai.classifyEmail(email);
+          this.stageClassification(message.gmailId, classified);
           this.database.finishMessage(message.gmailId);
           this.#lastError = null;
         } catch (error) {
@@ -218,6 +216,13 @@ export class ScanWorker {
       }
     };
     await consume();
+  }
+
+  /** Stages school changes for review and calendar proposals without direct record creation. */
+  private stageClassification(gmailId: string, classified: ClassifiedEmail): void {
+    if (classified.school.length) this.database.stageGmailSchoolImport(gmailId, classified.school);
+    const calendarId = this.database.getSettings().calendarId;
+    for (const event of classified.events) this.database.saveCandidate(event.draft, gmailId, event.fingerprint, calendarId, event.changeKind, event.relatedCandidateId);
   }
 
   /** Runs due scheduled scans and resumes queue work. */

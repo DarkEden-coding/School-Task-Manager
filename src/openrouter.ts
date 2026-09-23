@@ -1,4 +1,4 @@
-import { getSupportedThinkingLevels, type AssistantMessage, type Message, type Model, type ThinkingLevelMap, type Tool } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels, type AssistantMessage, type Message, type Model, type ThinkingLevelMap, type Tool, type ToolCall } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { OPENROUTER_MODELS } from "@earendil-works/pi-ai/providers/openrouter.models";
 import type { AppDatabase } from "./database.js";
@@ -358,8 +358,8 @@ function toolCallFromCompletion(completion: OpenRouterChatCompletion) {
   if (!call?.function?.name) return undefined;
   let parsed: unknown = {};
   try { parsed = JSON.parse(call.function.arguments || "{}") as unknown; } catch { throw new Error("OpenRouter returned invalid tool arguments"); }
-  if (!parsed || typeof parsed !== "object") throw new Error("OpenRouter returned invalid tool arguments");
-  return { type: "toolCall" as const, id: call.id || "openrouter-tool", name: call.function.name, arguments: parsed as Record<string, unknown> };
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("OpenRouter returned invalid tool arguments");
+  return { type: "toolCall" as const, id: call.id || "openrouter-tool", name: call.function.name, arguments: parsed as ToolCall["arguments"] };
 }
 
 /** Flattens OpenRouter batch error payloads. */

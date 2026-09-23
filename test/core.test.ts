@@ -3,12 +3,22 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { schoolItemsFromToolCall } from "../src/classify.js";
+import { classifiedEmailFromToolCall, schoolItemsFromToolCall } from "../src/classify.js";
+import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
 import { AppDatabase } from "../src/database.js";
 import { readableEmailBody } from "../src/google.js";
 import { eventFingerprint, validateEventDraft } from "../src/event-validation.js";
 import { isExpiredCodexAuthError } from "../src/openai.js";
 import { isOpenRouterBatchModel, OpenRouterService, openRouterInferenceModelId } from "../src/openrouter.js";
+
+test("Codex catalog includes GPT-6 Sol and Luna", () => {
+  assert.ok(OPENAI_CODEX_MODELS["gpt-6-sol"]?.input.includes("image"));
+  assert.ok(OPENAI_CODEX_MODELS["gpt-6-luna"]?.input.includes("image"));
+});
+
+test("email extraction fails rather than silently discarding a missing tool call", () => {
+  assert.throws(() => classifiedEmailFromToolCall(undefined, "UTC", []), /did not submit email classification/);
+});
 
 test("dedicated school import tool rejects unsafe payload fields", () => {
   const base = { type: "toolCall" as const, id: "1", name: "submit_school_import" };
