@@ -79,6 +79,8 @@ rm -rf "$NEW_DIR"
 mv "$STAGE" "$NEW_DIR"
 # The release contains no mutable state; state stays in STATE_DIR.
 chown -R root:root "$NEW_DIR"
+# mktemp creates the stage directory as 0700; the service user must traverse it.
+chmod 0755 "$NEW_DIR"
 rm -rf "$OLD_DIR"
 if [[ -d "$APP_DIR" ]]; then mv "$APP_DIR" "$OLD_DIR"; fi
 mv "$NEW_DIR" "$APP_DIR"
