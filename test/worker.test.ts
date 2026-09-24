@@ -55,7 +55,7 @@ test("scanned school mail stages assignments for review without creating classes
 test("Jev skips low-scoring mail and a next-day override processes it without scoring again", async () => {
   const directory = mkdtempSync(join(tmpdir(), "email-manager-worker-"));
   const database = new AppDatabase(join(directory, "test.sqlite"), directory);
-  database.queueMessage({ id: "mail-skipped", threadId: "thread-skipped", internalDate: "1234567890000", subject: "Robotics event", sender: "club@example.edu" });
+  database.queueMessage({ id: "mail-skipped", threadId: "thread-skipped", internalDate: "1234567890000" });
   database.updateSettings({ timezone: "UTC" });
   database.setMarker("lastScheduledDate", new Date().toISOString().slice(0, 10));
   const email = { id: "mail-skipped", subject: "Robotics event", sender: "club@example.edu", date: "2027-01-01T12:00:00Z", body: "Nothing new", calendarText: "", gmailUrl: "https://mail.google.com/mail/u/0/#all/mail-skipped" };
@@ -72,6 +72,9 @@ test("Jev skips low-scoring mail and a next-day override processes it without sc
     assert.equal(classified, 0);
     assert.equal(scored, 1);
     assert.equal(database.listProcessedMessages()[0]?.jevResult, "skipped");
+    assert.equal(database.listProcessedMessages()[0]?.subject, email.subject);
+    assert.equal(database.listProcessedMessages()[0]?.sender, email.sender);
+    assert.equal(database.listProcessedMessages()[0]?.internalDate, String(Date.parse(email.date)));
     worker.scheduleJevOverride("mail-skipped");
     const row = database.listProcessedMessages()[0]!;
     assert.equal(row.override, true);

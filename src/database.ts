@@ -116,6 +116,13 @@ export class AppDatabase implements CredentialStore {
     return row ? { gmailId: row.gmail_id, threadId: row.thread_id, attempts: row.attempts, jevResult: row.jev_result, override: Boolean(row.jev_override) } : undefined;
   }
 
+  /** Saves Gmail metadata fetched before filtering, including messages Jev skips. */
+  public updateMessageMetadata(gmailId: string, subject: string, sender: string, date: string): void {
+    const timestamp = Date.parse(date);
+    this.db.prepare("UPDATE messages SET subject=?, sender=?, internal_date=CASE WHEN ? THEN ? ELSE internal_date END WHERE gmail_id=?")
+      .run(subject, sender, Number.isFinite(timestamp) ? 1 : 0, Number.isFinite(timestamp) ? String(timestamp) : "", gmailId);
+  }
+
   /** Persists a Jev decision before sending a passed email to the full model. */
   public saveJevResult(gmailId: string, result: "passed" | "error", scores: JevScores | null): void {
     this.db.prepare("UPDATE messages SET jev_result=?, jev_scores=?, updated_at=CURRENT_TIMESTAMP WHERE gmail_id=?").run(result, scores ? JSON.stringify(scores) : null, gmailId);
@@ -189,7 +196,7 @@ export class AppDatabase implements CredentialStore {
 
   /** Finds a candidate likely to represent the same event. */
   public findCandidateByFingerprint(fingerprint: string): number | undefined {
-    const row = this.db.prepare("SELECT id FROM candidates WHERE fingerprint=? AND status!='denied' ORDER BY id DESC LIMIT 1").get(fingerprint) as { id: number } | undefined;
+    const row = this.db.prepare("SELECT id FROM candidates WHERE fingerprint=? ORDER BY id DESC LIMIT 1").get(fingerprint) as { id: number } | undefined;
     return row?.id;
   }
 

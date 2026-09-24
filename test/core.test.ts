@@ -106,6 +106,10 @@ test("duplicate candidates group source messages", () => withDatabase((database)
   const second = database.saveCandidate(draft, "mail-2", fingerprint, "calendar");
   assert.equal(first, second);
   assert.deepEqual(database.getCandidate(first)?.sourceMessageIds.sort(), ["mail-1", "mail-2"]);
+  database.setCandidateStatus(first, "denied");
+  assert.equal(database.saveCandidate(draft, "mail-2", fingerprint, "calendar"), first);
+  assert.equal(database.saveAgentCandidate(draft, fingerprint, "calendar").id, first);
+  assert.equal(database.listCandidates("pending").length, 0);
 }));
 
 test("queue claim and retry preserve durable state", () => withDatabase((database) => {

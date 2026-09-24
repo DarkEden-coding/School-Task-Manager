@@ -219,6 +219,7 @@ export class ScanWorker {
             continue;
           }
           const email = await this.google.getMessage(message.gmailId);
+          this.database.updateMessageMetadata(message.gmailId, email.subject, email.sender, email.date);
           if (!message.override && !message.jevResult) {
             try {
               if (await this.openai.openrouter.isConnected()) {
