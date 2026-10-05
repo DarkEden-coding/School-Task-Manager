@@ -412,6 +412,7 @@ dialog.datetime-modal::backdrop { background: #0d0f11d8; }
 .upcoming-group h3 { display:flex; align-items:center; gap:9px; margin:0 0 10px; color:#cdd4dd; font-size:12px; font-weight:800; letter-spacing:.7px; text-transform:uppercase; }
 .upcoming-group h3::after { content:""; flex:1; height:1px; background:var(--border); }
 .upcoming-assignment { padding:13px; border:1px solid var(--border); border-radius:12px; background:var(--surface-raised); box-shadow:var(--shadow-soft); }
+.upcoming-assignment.due-morning { border:2px solid #f0a050; }
 .upcoming-assignment + .upcoming-assignment { margin-top:9px; }
 .upcoming-assignment .work-row { padding:0; border:0; }
 .upcoming-assignment .work-row strong { display:block; line-height:1.35; }
